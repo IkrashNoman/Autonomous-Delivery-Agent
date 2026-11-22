@@ -103,7 +103,7 @@ No third-party graph-search, game-tree, or minimax libraries are used. Each of t
 ### Prerequisites
 - Python 3.10+
 - `numpy`, `matplotlib` for the core pipeline
-- An LLM provider for Part D (see `requirements.txt` for the chosen wrapper)
+- An LLM provider (Create .env in root (/OEL) and and add a variable Name GROQ_API_KEY then add teh groq api key from [GROQ API KEY](https://console.groq.com/keys))
 
 ### Install
 
