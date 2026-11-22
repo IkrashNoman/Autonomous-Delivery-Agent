@@ -1,0 +1,37 @@
+D:\7th Semester\Artificial Intelligence\OEL>python oel_instance.py 00000453808 00000486980 00000481674 00000486992
+{
+  "instance_id": "51f66530",
+  "grid_size": 28,
+  "terrain_cost": {
+    "road": 3,
+    "grass": 4,
+    "mud": 8,
+    "ford": 9
+  },
+  "obstacle_density": 0.218,
+  "start": [
+    2,
+    21
+  ],
+  "delivery_stops": [
+    [
+      24,
+      10
+    ],
+    [
+      2,
+      9
+    ],
+    [
+      23,
+      14
+    ]
+  ],
+  "adversary": "chaser",
+  "slip_probability": 0.26,
+  "adversary_search_depth": 5,
+  "twists": [
+    "rival_steals_parcels",
+    "rush_hour_time_varying_costs"
+  ]
+}
