@@ -26,6 +26,8 @@ TERRAIN_COST = {
     "ford": 9,
 }
 COST_LOOKUP = np.array([3, 4, 8, 9], dtype=float)  # 0=road, 1=grass, 2=mud, 3=ford
+MIN_TERRAIN_COST = min(TERRAIN_COST.values())     # 3
+
 
 START = (2, 21)
 DELIVERY_STOPS = [(24, 10), (2, 9), (23, 14)]
@@ -61,6 +63,13 @@ CLOSURE_LOCATION_PROBS = {
     "random": 0.20,            # Anywhere on traversable road/grid cells (low/background)
 }
 
+# Part B: Search & Heuristic Defaults
+IDS_MEMORY_LIMIT_STATES = 5000
+INADMISSIBLE_HEURISTIC_WEIGHT = 1.8
+
+# Part C: Rival Game Search Defaults
+LOCAL_GAME_WINDOW_RADIUS = 6
+NUM_RIVAL_GAMES = 30
 
 def load_grid():
     """Load grid_51f66530.npy if available, otherwise regenerate from CMS_IDS."""

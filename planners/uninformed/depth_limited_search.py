@@ -13,13 +13,13 @@ from planners.state import (
 )
 
 
-def dls_recursive(env, curr, curr_t, g_cost, depth_limit, on_path, stats, memory_limit):
+def dls_recursive(env, curr, curr_t, g_cost, depth_limit, on_path, stats, memory_limit, max_expansions):
     """
     Recursive helper for Depth-Limited Search.
     Uses on_path set to avoid revisiting states on the active recursion stack.
     """
-    if len(on_path) > memory_limit:
-        stats["memory_exceeded"] = True
+    if len(on_path) > memory_limit or stats["expanded"] >= max_expansions:
+        stats["limit_exceeded"] = True
         return None, float("inf")
 
     stats["expanded"] += 1
@@ -42,27 +42,30 @@ def dls_recursive(env, curr, curr_t, g_cost, depth_limit, on_path, stats, memory
                 on_path,
                 stats,
                 memory_limit,
+                max_expansions,
             )
             on_path.remove(next_state)
 
             if sub_path is not None:
                 return [(curr[0], curr[1])] + sub_path, total_cost
-            if stats["memory_exceeded"]:
+            if stats["limit_exceeded"]:
                 return None, float("inf")
 
     return None, float("inf")
 
 
-def dls(env, depth_limit=55, start_t=0, memory_limit=config.IDS_MEMORY_LIMIT_STATES):
+def dls(env, depth_limit=55, start_t=0, memory_limit=config.IDS_MEMORY_LIMIT_STATES, max_expansions=15000):
     """Run Depth-Limited Search up to depth_limit."""
     tracemalloc.start()
     t0 = time.perf_counter()
 
     start_state = make_initial_state(env, start_t)
     on_path = {start_state}
-    stats = {"expanded": 0, "memory_exceeded": False}
+    stats = {"expanded": 0, "limit_exceeded": False}
 
-    path, cost = dls_recursive(env, start_state, start_t, 0.0, depth_limit, on_path, stats, memory_limit)
+    path, cost = dls_recursive(
+        env, start_state, start_t, 0.0, depth_limit, on_path, stats, memory_limit, max_expansions
+    )
     _, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
@@ -70,5 +73,5 @@ def dls(env, depth_limit=55, start_t=0, memory_limit=config.IDS_MEMORY_LIMIT_STA
     if path is not None:
         return format_result(f"DLS(L={depth_limit})", path, cost, stats["expanded"], peak_bytes / 1024.0, elapsed_ms)
 
-    status = "MEMORY_LIMIT" if stats["memory_exceeded"] else "CUTOFF"
+    status = "BUDGET_LIMIT" if stats["limit_exceeded"] else "CUTOFF"
     return format_result(f"DLS(L={depth_limit})", [], float("inf"), stats["expanded"], peak_bytes / 1024.0, elapsed_ms, status)

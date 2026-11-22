@@ -1,5 +1,6 @@
 import os
 import sys
+from collections import deque
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,21 +18,68 @@ DIR_NAMES = {
 class RoadClosureManager:
     """
     Third Twist: Predictive Dynamic Road Closures and Directional Maintenance.
-    Generates seeded closure/directional events with advance warnings and safe-exit rules.
+    Generates exact NUM_CLOSURE_EVENTS seeded closure/directional events biased toward
+    the planned delivery corridor (0.50 on_route, 0.30 near_route, 0.20 random).
     """
 
     def __init__(self, grid, planned_route=None, seed=None):
         self.grid = grid
         self.seed = config.SEED if seed is None else seed
         self.rng = np.random.default_rng(self.seed)
-        self.planned_route = list(planned_route) if planned_route else []
-        self.events = []
 
+        if planned_route:
+            self.planned_route = list(planned_route)
+        else:
+            self.planned_route = self._compute_baseline_corridor()
+
+        self.events = []
+        if "predictive_dynamic_road_closures" in config.TWISTS:
+            self.events = self._generate_events()
+
+    def _compute_baseline_corridor(self):
+        """
+        Compute a baseline shortest-step corridor visiting START -> DELIVERY_STOPS
+        when no explicit route is supplied, so on_route (0.50) and near_route (0.30)
+        probabilities always target real delivery paths.
+        """
+        waypoints = [config.START] + list(config.DELIVERY_STOPS)
+        corridor = []
+        rows, cols = self.grid.shape
+
+        for i in range(len(waypoints) - 1):
+            src, dst = waypoints[i], waypoints[i + 1]
+            q = deque([src])
+            parent = {src: None}
+            while q:
+                curr = q.popleft()
+                if curr == dst:
+                    break
+                for dr, dc in DIRECTIONS:
+                    nxt = (curr[0] + dr, curr[1] + dc)
+                    if 0 <= nxt[0] < rows and 0 <= nxt[1] < cols and self.grid[nxt] >= 0 and nxt not in parent:
+                        parent[nxt] = curr
+                        q.append(nxt)
+
+            if dst in parent:
+                seg = []
+                cur = dst
+                while cur is not None:
+                    seg.append(cur)
+                    cur = parent[cur]
+                seg.reverse()
+                corridor.extend(seg)
+
+        return corridor
+
+    def bind_route(self, planned_route):
+        """Re-seed and regenerate closure events around an updated planned route."""
+        self.planned_route = list(planned_route)
+        self.rng = np.random.default_rng(self.seed)
         if "predictive_dynamic_road_closures" in config.TWISTS:
             self.events = self._generate_events()
 
     def _categorize_cells(self):
-        """Partition eligible road/traversable cells into on_route, near_route, and random."""
+        """Partition eligible traversable cells into on_route, near_route, and random."""
         protected = {config.START, *config.DELIVERY_STOPS}
         route_set = set(self.planned_route)
 
@@ -39,10 +87,8 @@ class RoadClosureManager:
         near_route = []
         other_free = []
 
-        # Prefer road cells (0) first, fall back to any traversable cell (>= 0)
-        candidates = np.argwhere(self.grid == 0)
-        if len(candidates) < config.NUM_CLOSURE_EVENTS * 2:
-            candidates = np.argwhere(self.grid >= 0)
+        # Include all traversable cells so on_route/near_route always have rich candidates
+        candidates = np.argwhere(self.grid >= 0)
 
         for r, c in candidates:
             cell = (int(r), int(c))
@@ -63,7 +109,7 @@ class RoadClosureManager:
         return on_route, near_route, other_free
 
     def _generate_events(self):
-        """Generate seeded road closure and directional restriction events."""
+        """Generate exactly NUM_CLOSURE_EVENTS unique closure/directional events."""
         on_route, near_route, other_free = self._categorize_cells()
         used_cells = set()
         events = []
@@ -75,31 +121,31 @@ class RoadClosureManager:
             config.CLOSURE_LOCATION_PROBS["random"],
         ]
 
-        for event_id in range(1, config.NUM_CLOSURE_EVENTS + 1):
+        attempts = 0
+        max_attempts = config.NUM_CLOSURE_EVENTS * 25
+
+        while len(events) < config.NUM_CLOSURE_EVENTS and attempts < max_attempts:
+            attempts += 1
             zone = str(self.rng.choice(zones, p=probs))
             pool = {
-                "on_route": on_route,
-                "near_route": near_route,
-                "random": other_free,
+                "on_route": [c for c in on_route if c not in used_cells],
+                "near_route": [c for c in near_route if c not in used_cells],
+                "random": [c for c in other_free if c not in used_cells],
             }[zone]
 
-            # Fallback if chosen pool is empty
             if not pool:
-                pool = on_route or near_route or other_free
-            if not pool:
-                break
+                fallback = [c for c in (on_route + near_route + other_free) if c not in used_cells]
+                if not fallback:
+                    break
+                pool = fallback
 
-            idx = int(self.rng.integers(0, len(pool)))
-            cell = pool[idx]
-            if cell in used_cells:
-                continue
+            cell = pool[int(self.rng.integers(0, len(pool)))]
             used_cells.add(cell)
 
             active_start = int(self.rng.integers(4, 35))
             warn_start = max(0, active_start - config.CLOSURE_WARNING_LEAD)
             active_end = active_start + config.CLOSURE_DURATION
 
-            # 50% full closure, 50% directional maintenance (1 or 2 allowed entry vectors)
             if self.rng.random() < 0.5:
                 mode = "closed"
                 allowed_dirs = []
@@ -110,7 +156,7 @@ class RoadClosureManager:
                 allowed_dirs = [DIRECTIONS[int(i)] for i in chosen_idx]
 
             events.append({
-                "event_id": event_id,
+                "event_id": len(events) + 1,
                 "cell": cell,
                 "zone": zone,
                 "mode": mode,
@@ -128,6 +174,16 @@ class RoadClosureManager:
             if ev["cell"] == cell and ev["active_start"] <= t < ev["active_end"]:
                 return ev
         return None
+
+    def get_closed_cells(self, t):
+        """Return list of coordinates that are fully closed ('closed') at step t."""
+        if "predictive_dynamic_road_closures" not in config.TWISTS:
+            return []
+        return [
+            ev["cell"]
+            for ev in self.events
+            if ev["mode"] == "closed" and ev["active_start"] <= t < ev["active_end"]
+        ]
 
     def get_upcoming_warnings(self, t):
         """Return events currently in their advance warning window or active at step t."""
@@ -150,14 +206,13 @@ class RoadClosureManager:
     def is_move_allowed(self, curr_pos, next_pos, t):
         """
         Check if moving from curr_pos to next_pos at step t is valid:
-        - Safe-exit rule: if curr_pos is closed, agent may exit to any unrestricted neighbor.
+        - Safe-exit rule: if curr_pos is closed, any agent may exit to an unrestricted neighbor.
         - Cannot enter a 'closed' cell.
-        - Can enter a 'directional' cell only if move vector (dr, dc) is in allowed_dirs.
+        - Can enter a 'directional' cell only along its permitted entry vector(s).
         """
         if "predictive_dynamic_road_closures" not in config.TWISTS:
             return True
 
-        # Safe exit from curr_pos is always permitted as long as destination is valid
         event = self.get_active_event(next_pos, t)
         if event is None:
             return True

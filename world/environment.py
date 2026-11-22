@@ -4,7 +4,7 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from world.cost_map import get_step_cost, is_rush_hour
+from world.cost_map import get_step_cost, get_wait_cost, is_rush_hour
 from world.road_closures import RoadClosureManager, DIRECTIONS
 
 
@@ -13,7 +13,7 @@ class GridWorldEnv:
     Core grid city simulation environment integrating:
     - Terrain costs & rush-hour time-varying multipliers
     - Stochastic movement slip (slip_probability = 0.26)
-    - Chaser rival that steals parcels
+    - Chaser rival that steals parcels (obeying road closures & theft cooldown)
     - Predictive dynamic road closures & directional maintenance
     """
 
@@ -47,8 +47,16 @@ class GridWorldEnv:
                 return cand
         return (int(free_cells[0][0]), int(free_cells[0][1]))
 
-    def reset(self):
-        """Reset episode state to t = 0."""
+    def reset(self, seed=None):
+        """Reset episode state to t = 0 and re-seed both slip RNG and dynamic road closures."""
+        if seed is not None:
+            self.seed = seed
+            self.rng = np.random.default_rng(self.seed)
+            self.closure_mgr.seed = self.seed
+            self.closure_mgr.rng = np.random.default_rng(self.seed)
+            if "predictive_dynamic_road_closures" in config.TWISTS:
+                self.closure_mgr.events = self.closure_mgr._generate_events()
+
         self.agent_pos = self.start
         self.rival_pos = self.rival_start
         self.delivered = set()
@@ -71,6 +79,7 @@ class GridWorldEnv:
             "rush_hour": is_rush_hour(self.t),
             "total_cost": round(self.total_cost, 2),
             "slip_count": self.slip_count,
+            "rival_cooldown": self.rival_cooldown,
             "warnings": self.closure_mgr.get_upcoming_warnings(self.t),
         }
 
@@ -81,10 +90,7 @@ class GridWorldEnv:
 
     def get_valid_neighbors(self, pos, t):
         """Return valid (next_pos, step_cost) transitions from pos at step t."""
-        neighbors = []
-        # Allow waiting in place (useful when waiting out a brief road closure or rush hour)
-        wait_cost = get_step_cost(self.grid, pos, t) * 0.5
-        neighbors.append((pos, wait_cost))
+        neighbors = [(pos, get_wait_cost(self.grid, pos, t))]
 
         for dr, dc in DIRECTIONS:
             nxt = (pos[0] + dr, pos[1] + dc)
@@ -98,7 +104,6 @@ class GridWorldEnv:
             return intended_move, False
 
         dr, dc = intended_move
-        # Perpendicular directions to (dr, dc)
         perp_options = [(dc, dr), (-dc, -dr)]
         chosen_perp = perp_options[int(self.rng.integers(0, 2))]
         slipped_pos = (pos[0] + chosen_perp[0], pos[1] + chosen_perp[1])
@@ -106,24 +111,26 @@ class GridWorldEnv:
         if self.in_bounds_and_free(slipped_pos) and self.closure_mgr.is_move_allowed(pos, slipped_pos, self.t):
             return chosen_perp, True
 
-        # If perpendicular cell is blocked, agent slips and stays in current cell
         return (0, 0), True
 
-    def _default_chaser_step(self):
-        """Greedy chaser fallback step when not driven by Part C Minimax/Alpha-Beta."""
-        if self.rival_cooldown > 0:
-            self.rival_cooldown -= 1
-            return self.rival_pos
+    def get_valid_rival_moves(self, rival_pos, t):
+        """Return all legal moves for the rival at step t (respecting obstacles and road closures)."""
+        moves = [rival_pos]
+        for dr, dc in DIRECTIONS:
+            cand = (rival_pos[0] + dr, rival_pos[1] + dc)
+            if self.in_bounds_and_free(cand) and self.closure_mgr.is_move_allowed(rival_pos, cand, t):
+                moves.append(cand)
+        return moves
 
+    def _default_chaser_step(self):
+        """Greedy chaser fallback step obeying obstacles and road closures."""
         best_pos = self.rival_pos
         best_dist = abs(self.rival_pos[0] - self.agent_pos[0]) + abs(self.rival_pos[1] - self.agent_pos[1])
-        for dr, dc in DIRECTIONS:
-            cand = (self.rival_pos[0] + dr, self.rival_pos[1] + dc)
-            if self.in_bounds_and_free(cand):
-                d = abs(cand[0] - self.agent_pos[0]) + abs(cand[1] - self.agent_pos[1])
-                if d < best_dist:
-                    best_dist = d
-                    best_pos = cand
+        for cand in self.get_valid_rival_moves(self.rival_pos, self.t):
+            d = abs(cand[0] - self.agent_pos[0]) + abs(cand[1] - self.agent_pos[1])
+            if d < best_dist:
+                best_dist = d
+                best_pos = cand
         return best_pos
 
     def step(self, action, rival_next_pos=None):
@@ -144,9 +151,10 @@ class GridWorldEnv:
         else:
             next_pos = self.agent_pos
 
-        step_cost = get_step_cost(self.grid, next_pos, self.t)
         if next_pos == self.agent_pos:
-            step_cost *= 0.5
+            step_cost = get_wait_cost(self.grid, self.agent_pos, self.t)
+        else:
+            step_cost = get_step_cost(self.grid, next_pos, self.t)
 
         self.agent_pos = next_pos
         self.total_cost += step_cost
@@ -155,15 +163,21 @@ class GridWorldEnv:
         if self.agent_pos in self.stops and self.agent_pos not in self.delivered and self.agent_pos not in self.stolen:
             self.delivered.add(self.agent_pos)
 
-        # Move rival
-        if rival_next_pos is not None and self.in_bounds_and_free(rival_next_pos):
+        # Move rival every turn (cooldown only rate-limits parcel theft, not movement)
+        if (
+            rival_next_pos is not None
+            and self.in_bounds_and_free(rival_next_pos)
+            and self.closure_mgr.is_move_allowed(self.rival_pos, rival_next_pos, self.t)
+        ):
             self.rival_pos = rival_next_pos
         else:
             self.rival_pos = self._default_chaser_step()
 
-        # Check rival parcel theft (collision with agent or reaching an active stop first)
+        # Decrement theft cooldown, then check parcel theft when cooldown == 0
         stole_parcel = False
-        if "rival_steals_parcels" in config.TWISTS and self.rival_cooldown == 0:
+        if self.rival_cooldown > 0:
+            self.rival_cooldown -= 1
+        elif "rival_steals_parcels" in config.TWISTS:
             active_stops = [s for s in self.stops if s not in self.delivered and s not in self.stolen]
             if self.rival_pos in active_stops:
                 self.stolen.add(self.rival_pos)
@@ -171,7 +185,6 @@ class GridWorldEnv:
                 self.rival_cooldown = 3
                 stole_parcel = True
             elif self.rival_pos == self.agent_pos and active_stops:
-                # Chaser intercepts and steals the nearest undelivered parcel
                 nearest = min(active_stops, key=lambda s: abs(s[0] - self.agent_pos[0]) + abs(s[1] - self.agent_pos[1]))
                 self.stolen.add(nearest)
                 self.total_cost += config.RIVAL_STEAL_PENALTY
