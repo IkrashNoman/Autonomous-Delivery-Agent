@@ -14,10 +14,10 @@ from planners.state import (
     format_result,
 )
 
-
-def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom MST)"):
+def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom MST)", track_memory=True):
     """From-scratch optimal A* Search: f(n) = g(n) + h(n)."""
-    tracemalloc.start()
+    if track_memory:
+        tracemalloc.start()
     t0 = time.perf_counter()
 
     start_state = make_initial_state(env, start_t)
@@ -36,12 +36,11 @@ def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom 
         expanded += 1
 
         if is_goal_state(curr, len(env.stops)):
-            _, peak_bytes = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
+            peak_kb = (tracemalloc.get_traced_memory()[1] / 1024.0) if track_memory else 0.0
+            if track_memory:
+                tracemalloc.stop()
             path = reconstruct_path(came_from, curr)
-            return format_result(
-                label, path, g_cost, expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000
-            )
+            return format_result(label, path, g_cost, expanded, peak_kb, (time.perf_counter() - t0) * 1000)
 
         for next_state, step_cost in expand_search_state(env, curr, curr_t):
             new_g = g_cost + step_cost
@@ -51,6 +50,7 @@ def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom 
                 f_val = new_g + heuristic_fn(next_state, env.stops)
                 heapq.heappush(pq, (f_val, new_g, curr_t + 1, next_state))
 
-    _, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    return format_result(label, [], float("inf"), expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000, "FAILED")
+    peak_kb = (tracemalloc.get_traced_memory()[1] / 1024.0) if track_memory else 0.0
+    if track_memory:
+        tracemalloc.stop()
+    return format_result(label, [], float("inf"), expanded, peak_kb, (time.perf_counter() - t0) * 1000, "FAILED")
