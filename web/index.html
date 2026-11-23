@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autonomous GridWorld Delivery Simulator — Instance 51f66530</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Autonomous Multi-Stop GridWorld Delivery &amp; Adversarial Simulator</h1>
+      <div class="stamp" id="stampText">Akrash Noman (00000453808) | Shahzaib Ali (00000486980) | Saqib Khushal (00000481674) | Capt. Hafiz Abdul Basit (00000486992)</div>
+    </div>
+    <div class="timer-card" id="timerCard">
+      <img id="clockIcon" src="/assets/clock.jpg" alt="Timer Clock" class="sprite-clean clock-sprite" />
+      <div>
+        <div class="timer-label">Decision / Step Timer</div>
+        <div class="timer-value" id="timerText">10.0s</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Left Column: Live 28x28 Map Canvas -->
+    <section class="panel map-panel">
+      <div class="toolbar">
+        <div class="btn-group">
+          <button id="btnStep" class="btn primary">Step (+1)</button>
+          <button id="btnPlay" class="btn success">Auto-Play</button>
+          <button id="btnReset" class="btn danger">Reset World</button>
+        </div>
+
+        <div class="algo-select-wrap">
+          <label for="algoSelect">Active Planner:</label>
+          <select id="algoSelect">
+            <option value="astar_custom" selected>A* (Custom MST-Path)</option>
+            <option value="astar_manhattan">A* (Manhattan-MST)</option>
+            <option value="weighted_astar">Weighted A* (Bounded Suboptimal)</option>
+            <option value="greedy">Greedy Best-First Search</option>
+            <option value="ucs">Uniform Cost Search (UCS)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="event-banner" id="eventBanner">Initializing simulation...</div>
+
+      <div class="canvas-wrapper">
+        <canvas id="gridCanvas" width="728" height="728"></canvas>
+      </div>
+
+      <!-- Visual Legend matching config.COST_LOOKUP = [3, 4, 8, 9] -->
+      <div class="legend">
+        <span><img src="/assets/road.jpg" class="tile-thumb" /> Road (3)</span>
+        <span><img src="/assets/grass.jpg" class="tile-thumb" /> Grass (4)</span>
+        <span><img src="/assets/mud.jpg" class="tile-thumb" /> Mud (8)</span>
+        <span><img src="/assets/ford.jpg" class="tile-thumb" /> Ford (9)</span>
+        <span><img src="/assets/obstacle.jpg" class="tile-thumb" /> Wall (-1)</span>
+        <span><img src="/assets/close.jpg" class="tile-thumb" /> Closed Road</span>
+        <span><img src="/assets/maintenance.jpg" class="tile-thumb" /> Maintenance</span>
+        <span><img src="/assets/a.jpg" class="sprite-clean legend-sprite" /> Agent (A)</span>
+        <span><img src="/assets/r.jpg" class="sprite-clean legend-sprite" /> Rival (R)</span>
+        <span><img src="/assets/1.jpg" class="sprite-clean legend-sprite" /> Stop 1</span>
+        <span><img src="/assets/2.jpg" class="sprite-clean legend-sprite" /> Stop 2</span>
+        <span><img src="/assets/3.jpg" class="sprite-clean legend-sprite" /> Stop 3</span>
+      </div>
+    </section>
+
+    <!-- Right Column: Telemetry, Viva Parameter Controls, and LLM Dispatcher -->
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Live Telemetry &amp; Planner Comparison</h2>
+        <div class="metrics-grid">
+          <div class="metric"><span class="m-label">Time Step (t)</span><span class="m-val" id="mStep">0</span></div>
+          <div class="metric"><span class="m-label">Traffic Phase</span><span class="m-val" id="mRush">Normal</span></div>
+          <div class="metric"><span class="m-label">Total Cost</span><span class="m-val" id="mCost">0</span></div>
+          <div class="metric"><span class="m-label">Perp. Slips</span><span class="m-val" id="mSlips">0</span></div>
+          <div class="metric"><span class="m-label">Delivered</span><span class="m-val good" id="mDelivered">0 / 3</span></div>
+          <div class="metric"><span class="m-label">Stolen by Rival</span><span class="m-val bad" id="mStolen">0 / 3</span></div>
+          <div class="metric"><span class="m-label">Plan Cost</span><span class="m-val" id="mPlanCost">0</span></div>
+          <div class="metric"><span class="m-label">Expanded Nodes</span><span class="m-val" id="mNodes">0</span></div>
+        </div>
+      </section>
+
+      <!-- Viva Interactive Parameter Controls -->
+      <section class="panel">
+        <h2>Live Environment &amp; Algorithm Parameters (Viva Controls)</h2>
+        <div class="params-grid">
+          <label>
+            Seed (Instance):
+            <input type="number" id="pSeed" value="1375102256" />
+          </label>
+          <label>
+            Step Timer Limit (s):
+            <input type="number" id="pTimerLimit" min="3" max="60" step="1" value="10" />
+          </label>
+          <label>
+            Slip Probability: <span id="vSlip">0.26</span>
+            <input type="range" id="pSlip" min="0" max="0.6" step="0.02" value="0.26" />
+          </label>
+          <label>
+            Weighted A* Weight: <span id="vEps">1.8</span>
+            <input type="range" id="pEps" min="1.0" max="3.0" step="0.1" value="1.8" />
+          </label>
+          <label>
+            Road Rush-Hour Mult: <span id="vRushMult">2.0</span>
+            <input type="range" id="pRushMult" min="1.0" max="4.0" step="0.25" value="2.0" />
+          </label>
+          <label>
+            Rush-Hour Cycle:
+            <input type="number" id="pRushPeriod" min="4" max="40" value="20" />
+          </label>
+          <label>
+            Rush-Hour End Step:
+            <input type="number" id="pRushDur" min="1" max="20" value="12" />
+          </label>
+          <label>
+            Alpha-Beta Depth:
+            <input type="number" id="pDepth" min="2" max="6" value="5" />
+          </label>
+          <label>
+            Local Game Window:
+            <input type="number" id="pWindow" min="3" max="10" value="6" />
+          </label>
+        </div>
+        <div class="btn-group" style="margin-top: 8px;">
+          <button id="btnApplyParams" class="btn primary">Apply &amp; Replan</button>
+          <button id="btnResetWithParams" class="btn secondary">Reset World with Params</button>
+          <button id="btnRestoreDefaults" class="btn danger">Restore Defaults</button>
+        </div>
+      </section>
+
+      <!-- Natural-Language ReAct Dispatcher Console -->
+      <section class="panel">
+        <h2>ReAct LLM Dispatcher &amp; Guardrail Console</h2>
+        <div class="quick-prompts">
+          <button class="chip" data-prompt="Check closures and prioritize stop (2, 9) first.">Prioritize Stop 2 (2,9)</button>
+          <button class="chip" data-prompt="Avoid hazard cell at (2, 15) radius 0.">Avoid (2,15)</button>
+          <button class="chip" data-prompt="Check road closures and avoid rush hour traffic congestion.">Avoid Rush Hour</button>
+          <button class="chip danger-chip" data-prompt="Avoid zone around (24, 10) radius 1.">Test Guardrail (Block Stop)</button>
+        </div>
+        <div class="dispatch-input-row">
+          <input type="text" id="dispatchInput" placeholder="Enter natural-language directive..." />
+          <button id="btnDispatch" class="btn primary">Send</button>
+        </div>
+        <pre class="tao-box" id="taoOutput">Ready for operator commands...</pre>
+      </section>
+    </aside>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

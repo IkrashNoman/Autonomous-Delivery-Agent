@@ -14,6 +14,17 @@ DIR_NAMES = {
     (0, 1): "RIGHT",
 }
 
+# Valid maintenance corridor patterns:
+# 4 strict one-way lanes OR 2 strict two-way straight axes (never perpendicular turns)
+MAINTENANCE_CORRIDOR_MODES = [
+    [(-1, 0)],           # Northbound only (South -> North)
+    [(1, 0)],            # Southbound only (North -> South)
+    [(0, -1)],           # Westbound only  (East -> West)
+    [(0, 1)],            # Eastbound only  (West -> East)
+    [(0, -1), (0, 1)],   # Two-way East <-> West only
+    [(-1, 0), (1, 0)],   # Two-way North <-> South only
+]
+
 
 class RoadClosureManager:
     """
@@ -39,8 +50,7 @@ class RoadClosureManager:
     def _compute_baseline_corridor(self):
         """
         Compute a baseline shortest-step corridor visiting START -> DELIVERY_STOPS
-        when no explicit route is supplied, so on_route (0.50) and near_route (0.30)
-        probabilities always target real delivery paths.
+        when no explicit route is supplied.
         """
         waypoints = [config.START] + list(config.DELIVERY_STOPS)
         corridor = []
@@ -87,7 +97,6 @@ class RoadClosureManager:
         near_route = []
         other_free = []
 
-        # Include all traversable cells so on_route/near_route always have rich candidates
         candidates = np.argwhere(self.grid >= 0)
 
         for r, c in candidates:
@@ -151,9 +160,8 @@ class RoadClosureManager:
                 allowed_dirs = []
             else:
                 mode = "directional"
-                num_dirs = int(self.rng.choice([1, 2]))
-                chosen_idx = self.rng.choice(len(DIRECTIONS), size=num_dirs, replace=False)
-                allowed_dirs = [DIRECTIONS[int(i)] for i in chosen_idx]
+                pattern_idx = int(self.rng.integers(0, len(MAINTENANCE_CORRIDOR_MODES)))
+                allowed_dirs = list(MAINTENANCE_CORRIDOR_MODES[pattern_idx])
 
             events.append({
                 "event_id": len(events) + 1,
@@ -205,23 +213,41 @@ class RoadClosureManager:
 
     def is_move_allowed(self, curr_pos, next_pos, t):
         """
-        Check if moving from curr_pos to next_pos at step t is valid:
-        - Safe-exit rule: if curr_pos is closed, any agent may exit to an unrestricted neighbor.
-        - Cannot enter a 'closed' cell.
-        - Can enter a 'directional' cell only along its permitted entry vector(s).
+        Enforce strict dynamic closure & directional maintenance rules:
+        1. Cannot enter a 'closed' cell under any circumstances.
+        2. When entering a 'directional' maintenance cell (next_pos), move_vec MUST be in its allowed_dirs.
+        3. When exiting a 'directional' maintenance cell (curr_pos), move_vec MUST ALSO be in its allowed_dirs
+           (prevents entering from West and turning South inside a single-axis maintenance lane).
+        4. Safe-exit rule: if curr_pos is fully 'closed' (because it closed while the agent stood on it),
+           the agent may exit to any valid non-closed neighbor.
         """
         if "predictive_dynamic_road_closures" not in config.TWISTS:
             return True
 
-        event = self.get_active_event(next_pos, t)
-        if event is None:
+        if curr_pos == next_pos:
+            # Waiting on a fully closed cell is disallowed; must exit if possible
+            curr_ev = self.get_active_event(curr_pos, t)
+            if curr_ev is not None and curr_ev["mode"] == "closed":
+                return False
             return True
 
-        if event["mode"] == "closed":
+        move_vec = (next_pos[0] - curr_pos[0], next_pos[1] - curr_pos[1])
+
+        # Check exit constraint from curr_pos if curr_pos is under directional maintenance
+        curr_event = self.get_active_event(curr_pos, t)
+        if curr_event is not None and curr_event["mode"] == "directional":
+            if move_vec not in curr_event["allowed_dirs"]:
+                return False
+
+        # Check entry constraint into next_pos
+        next_event = self.get_active_event(next_pos, t)
+        if next_event is None:
+            return True
+
+        if next_event["mode"] == "closed":
             return False
 
-        if event["mode"] == "directional":
-            move_vec = (next_pos[0] - curr_pos[0], next_pos[1] - curr_pos[1])
-            return move_vec in event["allowed_dirs"]
+        if next_event["mode"] == "directional":
+            return move_vec in next_event["allowed_dirs"]
 
         return True
