@@ -1,6 +1,9 @@
 import os
+import copy
 import numpy as np
 from oel_instance import make_instance, stamp
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Group Members & Mandatory Stamp
 MEMBERS = [
@@ -12,73 +15,71 @@ MEMBERS = [
 CMS_IDS = [cms for _, cms in MEMBERS]
 STAMP = stamp(MEMBERS)
 
-# Instance Parameters (ID: 51f66530)
-INSTANCE_ID = "51f66530"
-GRID_FILE = f"grid_{INSTANCE_ID}.npy"
-GRID_SIZE = 28
-OBSTACLE_DENSITY = 0.218
+# Instance: every value comes from the instructor's generator, so a change in
+# oel_instance.py (for example the stop count) flows through automatically.
+_INSTANCE, _GRID = make_instance(CMS_IDS)
+
+INSTANCE_ID = _INSTANCE["instance_id"]
+GRID_SIZE = _INSTANCE["grid_size"]
+OBSTACLE_DENSITY = _INSTANCE["obstacle_density"]
 SEED = int(INSTANCE_ID, 16)
+GRID_FILE = os.path.join(ROOT_DIR, f"grid_{INSTANCE_ID}.npy")
 
-TERRAIN_COST = {
-    "road": 3,
-    "grass": 4,
-    "mud": 8,
-    "ford": 9,
-}
-COST_LOOKUP = np.array([3, 4, 8, 9], dtype=float)  # 0=road, 1=grass, 2=mud, 3=ford
-MIN_TERRAIN_COST = min(TERRAIN_COST.values())     # 3
+TERRAIN_COST = dict(_INSTANCE["terrain_cost"])  # road, grass, mud, ford
+COST_LOOKUP = np.array([TERRAIN_COST[t] for t in ("road", "grass", "mud", "ford")], dtype=float)  # 0=road,1=grass,2=mud,3=ford
+MIN_TERRAIN_COST = min(TERRAIN_COST.values())
 
+START = tuple(_INSTANCE["start"])
+DELIVERY_STOPS = [tuple(s) for s in _INSTANCE["delivery_stops"]]
 
-START = (2, 21)
-DELIVERY_STOPS = [(24, 10), (2, 9), (23, 14)]
+ADVERSARY = _INSTANCE["adversary"]
+SLIP_PROBABILITY = _INSTANCE["slip_probability"]
+ADVERSARY_SEARCH_DEPTH = _INSTANCE["adversary_search_depth"]
 
-ADVERSARY = "chaser"
-SLIP_PROBABILITY = 0.26
-ADVERSARY_SEARCH_DEPTH = 5
+# Twists: two assigned by the generator, plus the group's approved third twist
+RIVAL_TWIST = "rival_steals_parcels"
+RUSH_TWIST = "rush_hour_time_varying_costs"
+THIRD_TWIST = "road_closures_and_maintenance"
+TWISTS = list(_INSTANCE["twists"]) + [THIRD_TWIST]
 
-# Assigned Twists + Group-Proposed 3rd Twist
-TWISTS = [
-    "rival_steals_parcels",
-    "rush_hour_time_varying_costs",
-    "predictive_dynamic_road_closures",
-]
-
-# Twist 1: Rush-Hour Time-Varying Costs (active steps 6..13 in every 20-step cycle)
-RUSH_HOUR_CYCLE = 20
-RUSH_HOUR_WINDOW = (6, 13)
-RUSH_HOUR_MULTIPLIER = np.array([2.0, 1.0, 1.25, 1.0])  # road x2, mud x1.25
-
-# Twist 2: Rival Steals Parcels
+# Rival
 RIVAL_START = (14, 14)
 RIVAL_STEAL_PENALTY = 50
 
-# Twist 3: Predictive Dynamic Road Closures & Directional Maintenance
-CLOSURE_WARNING_LEAD = 4       # Steps of advance warning before restriction activates
-CLOSURE_DURATION = 6           # Steps each restriction stays active
-NUM_CLOSURE_EVENTS = 10        # Total seeded closure/maintenance events per episode
-NEAR_ROUTE_RADIUS = 2          # Manhattan distance defining "near the route"
+# Rush hour
+RUSH_HOUR_CYCLE = 20
+RUSH_HOUR_WINDOW = (6, 13)
+RUSH_HOUR_MULTIPLIER = np.array([2.0, 1.0, 1.25, 1.0])
+
+# Closures and maintenance (schedule is known to the planner)
+CLOSURE_WARNING_LEAD = 4
+CLOSURE_DURATION = 6
+NUM_CLOSURE_EVENTS = 10
+NEAR_ROUTE_RADIUS = 2
 CLOSURE_LOCATION_PROBS = {
-    "on_route": 0.50,          # Directly on planned route (high impact)
-    "near_route": 0.30,        # Within 1-2 cells of route (moderate/detour impact)
-    "random": 0.20,            # Anywhere on traversable road/grid cells (low/background)
+    "on_route": 0.50,
+    "near_route": 0.30,
+    "random": 0.20,
 }
 
-# Part B: Search & Heuristic Defaults
+# Part B: search & heuristic defaults
 IDS_MEMORY_LIMIT_STATES = 5000
 INADMISSIBLE_HEURISTIC_WEIGHT = 1.8
+WEIGHTED_ASTAR_EPSILON = INADMISSIBLE_HEURISTIC_WEIGHT
 
-# Part C: Rival Game Search Defaults
+# Part C: rival game defaults
 LOCAL_GAME_WINDOW_RADIUS = 6
 NUM_RIVAL_GAMES = 30
 
-def load_grid():
-    """Load grid_51f66530.npy if available, otherwise regenerate from CMS_IDS."""
-    try:
-        if os.path.exists(GRID_FILE):
-            return np.load(GRID_FILE)
-    except Exception as e:
-        print(f"Warning: could not load {GRID_FILE} ({e}), regenerating...")
 
-    _, grid = make_instance(CMS_IDS)
-    np.save(GRID_FILE, grid)
-    return grid
+def load_grid():
+    """
+    Return the instance grid. It is regenerated deterministically from CMS_IDS, so it always
+    matches the generator. A copy is saved next to the project for reference only.
+    """
+    if not os.path.exists(GRID_FILE):
+        try:
+            np.save(GRID_FILE, _GRID)
+        except OSError:
+            pass
+    return _GRID.copy()

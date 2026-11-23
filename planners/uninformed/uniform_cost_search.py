@@ -14,8 +14,8 @@ from planners.state import (
 )
 
 
-def ucs(env, start_t=0):
-    """From-scratch Uniform-Cost Search (minimizes cumulative terrain & rush-hour cost)."""
+def ucs(env, start_t=0, max_expansions=60000):
+    """From-scratch Uniform-Cost Search with expansion budget (UI safety)."""
     tracemalloc.start()
     t0 = time.perf_counter()
 
@@ -32,6 +32,14 @@ def ucs(env, start_t=0):
             continue
 
         expanded += 1
+
+        if expanded >= max_expansions:
+            _, peak_bytes = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            return format_result(
+                "UCS", [], float("inf"), expanded, peak_bytes / 1024.0,
+                (time.perf_counter() - t0) * 1000, "BUDGET_LIMIT"
+            )
 
         if is_goal_state(curr, len(env.stops)):
             _, peak_bytes = tracemalloc.get_traced_memory()

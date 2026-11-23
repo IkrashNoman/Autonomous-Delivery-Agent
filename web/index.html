@@ -35,9 +35,10 @@
           <label for="algoSelect">Active Planner:</label>
           <select id="algoSelect">
             <option value="astar_custom" selected>A* (Custom MST-Path)</option>
-            <option value="astar_manhattan">A* (Manhattan-MST)</option>
+             <option value="astar_manhattan">A* (Nearest-Manhattan baseline)</option>
             <option value="weighted_astar">Weighted A* (Bounded Suboptimal)</option>
             <option value="greedy">Greedy Best-First Search</option>
+            <option value="race_aware">A* (Race-aware vs rival)</option>
             <option value="ucs">Uniform Cost Search (UCS)</option>
           </select>
         </div>
@@ -86,8 +87,23 @@
       <section class="panel">
         <h2>Live Environment &amp; Algorithm Parameters (Viva Controls)</h2>
         <div class="params-grid">
+        
+        <label>
+            Delivery stops (row,col; row,col; row,col):
+            <input type="text" id="pStops" value="24,10; 2,9; 23,14" />
+          </label>
           <label>
-            Seed (Instance):
+            <span><input type="checkbox" id="pTwistRival" checked /> Rival steals parcels</span>
+          </label>
+          <label>
+            <span><input type="checkbox" id="pTwistRush" checked /> Rush-hour costs</span>
+          </label>
+          <label>
+            <span><input type="checkbox" id="pTwistClosure" checked /> Road closures &amp; maintenance</span>
+          </label>
+
+          <label>
+            Seed (closures &amp; rival RNG):
             <input type="number" id="pSeed" value="1375102256" />
           </label>
           <label>

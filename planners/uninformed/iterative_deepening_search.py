@@ -20,11 +20,19 @@ def ids(env, max_depth=65, start_t=0, memory_limit=config.IDS_MEMORY_LIMIT_STATE
     total_expanded = 0
 
     for limit in range(1, max_depth + 1):
+        remaining_budget = max(0, max_expansions - total_expanded)
+        if remaining_budget == 0:
+            _, peak_bytes = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            return format_result(
+                "IDS", [], float("inf"), total_expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000, "BUDGET_LIMIT"
+            )
+
         on_path = {start_state}
         stats = {"expanded": 0, "limit_exceeded": False}
 
         path, cost = dls_recursive(
-            env, start_state, start_t, 0.0, limit, on_path, stats, memory_limit, max_expansions - total_expanded
+            env, start_state, start_t, 0.0, limit, on_path, stats, memory_limit, remaining_budget
         )
         total_expanded += stats["expanded"]
 

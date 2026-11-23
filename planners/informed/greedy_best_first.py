@@ -15,8 +15,8 @@ from planners.state import (
 )
 
 
-def greedy_best_first(env, heuristic_fn=custom_mst_heuristic, start_t=0):
-    """From-scratch Greedy Best-First Search: f(n) = h(n)."""
+def greedy_best_first(env, heuristic_fn=custom_mst_heuristic, start_t=0, max_expansions=60000):
+    """From-scratch Greedy Best-First Search with expansion budget (UI safety)."""
     tracemalloc.start()
     t0 = time.perf_counter()
 
@@ -30,6 +30,14 @@ def greedy_best_first(env, heuristic_fn=custom_mst_heuristic, start_t=0):
     while pq:
         _, g_cost, curr_t, curr = heapq.heappop(pq)
         expanded += 1
+
+        if expanded >= max_expansions:
+            _, peak_bytes = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            return format_result(
+                "Greedy Best-First", [], float("inf"), expanded, peak_bytes / 1024.0,
+                (time.perf_counter() - t0) * 1000, "BUDGET_LIMIT"
+            )
 
         if is_goal_state(curr, len(env.stops)):
             _, peak_bytes = tracemalloc.get_traced_memory()

@@ -26,9 +26,14 @@ MAINTENANCE_CORRIDOR_MODES = [
 ]
 
 
+def has_closure_twist():
+    """Return True if dynamic road closures are enabled in config.TWISTS."""
+    return any("closure" in tw for tw in config.TWISTS)
+
+
 class RoadClosureManager:
     """
-    Third Twist: Predictive Dynamic Road Closures and Directional Maintenance.
+    Third Twist: Dynamic Road Closures and Directional Maintenance.
     Generates exact NUM_CLOSURE_EVENTS seeded closure/directional events biased toward
     the planned delivery corridor (0.50 on_route, 0.30 near_route, 0.20 random).
     """
@@ -44,7 +49,7 @@ class RoadClosureManager:
             self.planned_route = self._compute_baseline_corridor()
 
         self.events = []
-        if "predictive_dynamic_road_closures" in config.TWISTS:
+        if has_closure_twist():
             self.events = self._generate_events()
 
     def _compute_baseline_corridor(self):
@@ -85,7 +90,7 @@ class RoadClosureManager:
         """Re-seed and regenerate closure events around an updated planned route."""
         self.planned_route = list(planned_route)
         self.rng = np.random.default_rng(self.seed)
-        if "predictive_dynamic_road_closures" in config.TWISTS:
+        if has_closure_twist():
             self.events = self._generate_events()
 
     def _categorize_cells(self):
@@ -185,7 +190,7 @@ class RoadClosureManager:
 
     def get_closed_cells(self, t):
         """Return list of coordinates that are fully closed ('closed') at step t."""
-        if "predictive_dynamic_road_closures" not in config.TWISTS:
+        if not has_closure_twist():
             return []
         return [
             ev["cell"]
@@ -216,16 +221,13 @@ class RoadClosureManager:
         Enforce strict dynamic closure & directional maintenance rules:
         1. Cannot enter a 'closed' cell under any circumstances.
         2. When entering a 'directional' maintenance cell (next_pos), move_vec MUST be in its allowed_dirs.
-        3. When exiting a 'directional' maintenance cell (curr_pos), move_vec MUST ALSO be in its allowed_dirs
-           (prevents entering from West and turning South inside a single-axis maintenance lane).
-        4. Safe-exit rule: if curr_pos is fully 'closed' (because it closed while the agent stood on it),
-           the agent may exit to any valid non-closed neighbor.
+        3. When exiting a 'directional' maintenance cell (curr_pos), move_vec MUST ALSO be in its allowed_dirs.
+        4. Safe-exit rule: if curr_pos is fully 'closed', the agent may exit to any valid non-closed neighbor.
         """
-        if "predictive_dynamic_road_closures" not in config.TWISTS:
+        if not has_closure_twist():
             return True
 
         if curr_pos == next_pos:
-            # Waiting on a fully closed cell is disallowed; must exit if possible
             curr_ev = self.get_active_event(curr_pos, t)
             if curr_ev is not None and curr_ev["mode"] == "closed":
                 return False
@@ -233,13 +235,11 @@ class RoadClosureManager:
 
         move_vec = (next_pos[0] - curr_pos[0], next_pos[1] - curr_pos[1])
 
-        # Check exit constraint from curr_pos if curr_pos is under directional maintenance
         curr_event = self.get_active_event(curr_pos, t)
         if curr_event is not None and curr_event["mode"] == "directional":
             if move_vec not in curr_event["allowed_dirs"]:
                 return False
 
-        # Check entry constraint into next_pos
         next_event = self.get_active_event(next_pos, t)
         if next_event is None:
             return True

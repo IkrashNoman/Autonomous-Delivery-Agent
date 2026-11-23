@@ -22,6 +22,7 @@ let isAutoPlaying = false;
 let isStepping = false;
 let countdownTimer = null;
 let remainingSec = 10.0;
+let lastOverrides = null;
 
 function removeWhiteBackground(img) {
   const off = document.createElement("canvas");
@@ -107,7 +108,24 @@ function updateClockDisplay() {
   }
 }
 
+function parseStops(text) {
+  const pairs = text.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
+  return pairs.map((p) => {
+    const parts = p.split(",").map((x) => parseInt(x.trim(), 10));
+    if (parts.length !== 2 || parts.some((x) => Number.isNaN(x))) {
+      throw new Error(`Bad stop "${p}". Use: row,col; row,col; row,col`);
+    }
+    return parts;
+  });
+}
+
 function gatherOverrides() {
+  let stops = lastOverrides ? lastOverrides.STOPS : [];
+  try {
+    stops = parseStops(document.getElementById("pStops").value);
+  } catch (err) {
+    alert(err.message);
+  }
   return {
     SEED: parseInt(document.getElementById("pSeed").value, 10),
     TURN_TIME_LIMIT_SEC: parseFloat(document.getElementById("pTimerLimit").value),
@@ -118,6 +136,10 @@ function gatherOverrides() {
     RUSH_HOUR_END: parseInt(document.getElementById("pRushDur").value, 10),
     ADVERSARY_SEARCH_DEPTH: parseInt(document.getElementById("pDepth").value, 10),
     LOCAL_GAME_WINDOW_RADIUS: parseInt(document.getElementById("pWindow").value, 10),
+    STOPS: stops,
+    TWIST_RIVAL: document.getElementById("pTwistRival").checked,
+    TWIST_RUSH: document.getElementById("pTwistRush").checked,
+    TWIST_CLOSURE: document.getElementById("pTwistClosure").checked,
   };
 }
 
@@ -262,8 +284,22 @@ function renderGrid() {
     ctx.restore();
   });
 
-  // 7. Draw Rival (R)
+
+  // 7. Draw Rival (R) with a translucent penalty halo showing the tactical engagement field
   const [rr, rc] = stateData.rival_pos;
+  const radiusPenalty = 3;
+  ctx.save();
+  ctx.fillStyle = "rgba(239, 68, 68, 0.15)";
+  for (let dr = -radiusPenalty; dr <= radiusPenalty; dr++) {
+    for (let dc = -radiusPenalty; dc <= radiusPenalty; dc++) {
+      const d = Math.abs(dr) + Math.abs(dc);
+      if (d === 0 || d > radiusPenalty) continue;
+      const r2 = rr + dr, c2 = rc + dc;
+      if (r2 < 0 || r2 >= rows || c2 < 0 || c2 >= cols) continue;
+      ctx.fillRect(c2 * cellW, r2 * cellH, cellW, cellH);
+    }
+  }
+  ctx.restore();
   if (IMAGES.rival) {
     ctx.drawImage(IMAGES.rival, rc * cellW, rr * cellH, cellW, cellH);
   }
@@ -282,6 +318,7 @@ function updateUI(data) {
   document.getElementById("algoSelect").value = data.algorithm;
 
   if (data.overrides) {
+    lastOverrides = data.overrides;
     document.getElementById("pSeed").value = data.overrides.SEED;
     document.getElementById("pTimerLimit").value = data.overrides.TURN_TIME_LIMIT_SEC;
     document.getElementById("pSlip").value = data.overrides.SLIP_PROBABILITY;
@@ -294,10 +331,18 @@ function updateUI(data) {
     document.getElementById("pRushDur").value = data.overrides.RUSH_HOUR_END;
     document.getElementById("pDepth").value = data.overrides.ADVERSARY_SEARCH_DEPTH;
     document.getElementById("pWindow").value = data.overrides.LOCAL_GAME_WINDOW_RADIUS;
+    if (document.activeElement.id !== "pStops") {
+      document.getElementById("pStops").value = data.overrides.STOPS.map((s) => `${s[0]},${s[1]}`).join("; ");
+    }
+    document.getElementById("pTwistRival").checked = data.overrides.TWIST_RIVAL;
+    document.getElementById("pTwistRush").checked = data.overrides.TWIST_RUSH;
+    document.getElementById("pTwistClosure").checked = data.overrides.TWIST_CLOSURE;
   }
 
   document.getElementById("mStep").textContent = data.t;
-  document.getElementById("mRush").textContent = data.rush_hour ? `RUSH HOUR (${data.overrides.RUSH_HOUR_MULTIPLIER}x road)` : "Normal (1x)";
+  document.getElementById("mRush").textContent = data.rush_hour
+    ? `RUSH HOUR (${data.overrides.RUSH_HOUR_MULTIPLIER}x road)`
+    : "Normal (1x)";
   document.getElementById("mRush").className = data.rush_hour ? "m-val bad" : "m-val good";
   document.getElementById("mCost").textContent = data.total_cost;
   document.getElementById("mSlips").textContent = data.slip_count;
@@ -315,7 +360,16 @@ async function apiPost(endpoint, payload = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await res.json();
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (err) {
+    data = null;
+  }
+  if (!res.ok || !data || data.error) {
+    alert((data && data.error) || `Request failed (HTTP ${res.status})`);
+    return null;
+  }
   updateUI(data);
   return data;
 }
@@ -349,7 +403,9 @@ document.getElementById("btnPlay").addEventListener("click", (e) => {
   } else {
     isAutoPlaying = true;
     e.target.textContent = "Pause";
-    runAutoPlayLoop();
+    // The countdown timer is the only automatic step driver; restart it for the next step.
+    remainingSec = getTimerLimit();
+    updateClockDisplay();
   }
 });
 
@@ -408,7 +464,7 @@ document.getElementById("btnDispatch").addEventListener("click", async () => {
   if (!instruction) return;
   document.getElementById("taoOutput").textContent = "Running ReAct Sense -> Reason -> Act loop...";
   const data = await apiPost("/api/dispatch", { instruction });
-  if (data.dispatch_result) {
+  if (data && data.dispatch_result) {
     document.getElementById("taoOutput").textContent = JSON.stringify(data.dispatch_result, null, 2);
   }
 });

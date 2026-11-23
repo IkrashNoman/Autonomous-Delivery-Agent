@@ -5,7 +5,7 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from world.cost_map import get_step_cost, get_wait_cost, is_rush_hour
-from world.road_closures import RoadClosureManager, DIRECTIONS
+from world.road_closures import RoadClosureManager, DIRECTIONS, has_closure_twist
 
 
 class GridWorldEnv:
@@ -14,7 +14,7 @@ class GridWorldEnv:
     - Terrain costs & rush-hour time-varying multipliers
     - Stochastic movement slip (slip_probability = 0.26)
     - Chaser rival that steals parcels (obeying road closures & theft cooldown)
-    - Predictive dynamic road closures & directional maintenance
+    - Dynamic road closures & directional maintenance
     """
 
     def __init__(self, grid=None, slip_prob=None, planned_route=None, seed=None):
@@ -48,18 +48,20 @@ class GridWorldEnv:
         return (int(free_cells[0][0]), int(free_cells[0][1]))
 
     def reset(self, seed=None):
-        """Reset episode state to t = 0 and re-seed both slip RNG and dynamic road closures."""
+        """Reset episode state to t = 0, re-seed RNGs, and auto-deliver if agent spawns on a stop."""
         if seed is not None:
             self.seed = seed
             self.rng = np.random.default_rng(self.seed)
             self.closure_mgr.seed = self.seed
             self.closure_mgr.rng = np.random.default_rng(self.seed)
-            if "predictive_dynamic_road_closures" in config.TWISTS:
+            if has_closure_twist():
                 self.closure_mgr.events = self.closure_mgr._generate_events()
 
         self.agent_pos = self.start
         self.rival_pos = self.rival_start
         self.delivered = set()
+        if self.agent_pos in self.stops:
+            self.delivered.add(self.agent_pos)
         self.stolen = set()
         self.t = 0
         self.total_cost = 0.0
@@ -90,7 +92,10 @@ class GridWorldEnv:
 
     def get_valid_neighbors(self, pos, t):
         """Return valid (next_pos, step_cost) transitions from pos at step t."""
-        neighbors = [(pos, get_wait_cost(self.grid, pos, t))]
+        neighbors = []
+        # Waiting is a move too: it is not allowed on a cell that is closed at step t
+        if self.closure_mgr.is_move_allowed(pos, pos, t):
+            neighbors.append((pos, get_wait_cost(self.grid, pos, t)))
 
         for dr, dc in DIRECTIONS:
             nxt = (pos[0] + dr, pos[1] + dc)
@@ -115,13 +120,13 @@ class GridWorldEnv:
 
     def get_valid_rival_moves(self, rival_pos, t):
         """Return all legal moves for the rival at step t (respecting obstacles and road closures)."""
-        moves = [rival_pos]
+        moves = [rival_pos] if self.closure_mgr.is_move_allowed(rival_pos, rival_pos, t) else []
         for dr, dc in DIRECTIONS:
             cand = (rival_pos[0] + dr, rival_pos[1] + dc)
             if self.in_bounds_and_free(cand) and self.closure_mgr.is_move_allowed(rival_pos, cand, t):
                 moves.append(cand)
         return moves
-
+    
     def _default_chaser_step(self):
         """Greedy chaser fallback step obeying obstacles and road closures."""
         best_pos = self.rival_pos
@@ -159,11 +164,9 @@ class GridWorldEnv:
         self.agent_pos = next_pos
         self.total_cost += step_cost
 
-        # Check parcel delivery
         if self.agent_pos in self.stops and self.agent_pos not in self.delivered and self.agent_pos not in self.stolen:
             self.delivered.add(self.agent_pos)
 
-        # Move rival every turn (cooldown only rate-limits parcel theft, not movement)
         if (
             rival_next_pos is not None
             and self.in_bounds_and_free(rival_next_pos)
@@ -173,11 +176,10 @@ class GridWorldEnv:
         else:
             self.rival_pos = self._default_chaser_step()
 
-        # Decrement theft cooldown, then check parcel theft when cooldown == 0
         stole_parcel = False
         if self.rival_cooldown > 0:
             self.rival_cooldown -= 1
-        elif "rival_steals_parcels" in config.TWISTS:
+        elif any("rival" in tw for tw in config.TWISTS):
             active_stops = [s for s in self.stops if s not in self.delivered and s not in self.stolen]
             if self.rival_pos in active_stops:
                 self.stolen.add(self.rival_pos)

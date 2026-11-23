@@ -5,12 +5,12 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from world.road_closures import DIRECTIONS
+from world.road_closures import DIRECTIONS, has_closure_twist
 
 
 def is_rush_hour(t):
     """Return True if simulation step t is inside the rush-hour window."""
-    if "rush_hour_time_varying_costs" not in config.TWISTS:
+    if not any("rush_hour" in tw for tw in config.TWISTS):
         return False
     phase = t % config.RUSH_HOUR_CYCLE
     start, end = config.RUSH_HOUR_WINDOW
@@ -48,7 +48,7 @@ def build_directional_cost_tensor(grid, t=0, closure_mgr=None):
     base_2d = build_cost_map_vectorized(grid, t=t, closure_mgr=closure_mgr)
     tensor = np.repeat(base_2d[:, :, np.newaxis], len(DIRECTIONS), axis=2)
 
-    if closure_mgr is not None and "predictive_dynamic_road_closures" in config.TWISTS:
+    if closure_mgr is not None and has_closure_twist():
         for ev in closure_mgr.events:
             if ev["mode"] == "directional" and ev["active_start"] <= t < ev["active_end"]:
                 r, c = ev["cell"]

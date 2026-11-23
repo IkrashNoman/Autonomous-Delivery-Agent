@@ -14,29 +14,18 @@ from dispatcher.schema import DispatchValidationError
 
 
 def _load_dotenv():
-    """Load key=value pairs from .env or .env.txt in project root or CWD."""
-    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    candidates = [
-        os.path.join(root_dir, ".env"),
-        os.path.join(root_dir, ".env.txt"),
-        os.path.join(os.getcwd(), ".env"),
-        os.path.join(os.getcwd(), ".env.txt"),
-    ]
-    for env_path in candidates:
-        if not os.path.exists(env_path):
-            continue
-        with open(env_path, "r", encoding="utf-8-sig") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export "):].strip()
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k and not os.environ.get(k):
-                    os.environ[k] = v
+    """Load KEY=VALUE pairs from the project's .env into os.environ. Existing variables are kept."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, "r", encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key.strip(), value)
 
 
 _load_dotenv()
@@ -51,9 +40,6 @@ Available tools:
 
 CRITICAL RULES:
 - Complete ALL actions requested by the user BEFORE returning "tool": "FINISH".
-- Example 1: "Check closures and prioritize stop (2, 9)" -> Step 1: inspect_closures({}), Step 2: plan_route({"priority_stop": [2, 9]}), Step 3: FINISH.
-- Example 2: "Prioritize stop (23, 14) and simulate" -> Step 1: plan_route({"priority_stop": [23, 14]}), Step 2: simulate({"seed": 42}), Step 3: FINISH.
-- Example 3: "Avoid zone around (10, 14) radius 1" -> Step 1: add_avoid_zone({"row": 10, "col": 14, "radius": 1}), Step 2: plan_route({}), Step 3: FINISH.
 - Never invent coordinates if the user gave none; pass null or call an invalid tool name so the guardrail catches it.
 - Output STRICT JSON ONLY (no markdown):
 {"thought": "...", "tool": "<inspect_closures|add_avoid_zone|plan_route|simulate|FINISH>", "args": {...}}"""
@@ -82,10 +68,16 @@ class LLMDispatcher:
             return None
 
         url = "https://api.groq.com/openai/v1/chat/completions"
+        try:
+            trace_json = json.dumps(trace, default=str)
+        except (TypeError, ValueError) as exc:
+            self.api_errors.append({"instruction": instruction, "type": "TRACE_SERIALIZE_ERROR", "detail": str(exc)})
+            return None
+
         user_msg = (
             f"Grid Info -> Start: {self.env.start}, Stops: {self.env.stops}, Agent: {self.env.agent_pos}, t={self.env.t}\n"
             f"Operator Request: {instruction}\n"
-            f"Completed Steps So Far: {json.dumps(trace)}\n"
+            f"Completed Steps So Far: {trace_json}\n"
             f"If any requested action in Operator Request has NOT been called yet, call that tool now. Otherwise return FINISH.\n"
             f"Return next JSON step:"
         )
@@ -129,7 +121,7 @@ class LLMDispatcher:
                 self.api_errors.append({"instruction": instruction, "type": "GROQ_API_ERROR", "detail": str(exc)})
                 return None
         return None
-
+    
     def _plan_react_steps_offline(self, instruction):
         """Deterministic ReAct policy for offline mode or API fallback."""
         text = instruction.lower().strip()
@@ -231,10 +223,7 @@ class LLMDispatcher:
         return valid_tools[tool_name](**args)
 
     def dispatch(self, instruction, reset_before=True):
-        """
-        Execute a Sense -> Reason -> Act ReAct session using Groq LLM (`openai/gpt-oss-20b`)
-        with automatic fallback and strict schema guardrail validation.
-        """
+        """Execute Sense -> Reason -> Act ReAct session with live Groq or deterministic offline policy."""
         if reset_before:
             self.toolkit.reset_constraints()
 
@@ -325,6 +314,11 @@ class LLMDispatcher:
                     "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
                 }
 
+            # The live attempt produced nothing usable: discard its trace so the offline run starts clean.
+            tao_trace = []
+            tool_calls = 0
+            final_cost = cost_before
+
         # Deterministic offline fallback
         planned_steps = self._plan_react_steps_offline(instruction)
         for idx, step in enumerate(planned_steps, start=1):
@@ -374,15 +368,27 @@ class LLMDispatcher:
                     "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
                 }
 
+        tao_trace.append({
+            "step": len(tao_trace) + 1,
+            "source": "OFFLINE_FALLBACK",
+            "sense_reason_act": "FINISH",
+            "thought": "All requested sub-tasks completed and verified.",
+            "action": "FINISH()",
+            "observation": "TASK_COMPLETE",
+        })
+
         return {
             "instruction": instruction,
             "source": "OFFLINE_FALLBACK",
             "status": "EXECUTED",
             "error": None,
             "tool_calls": tool_calls,
-            "tools_used": [s["action"].split("(")[0] for s in tao_trace],
+            "tools_used": [s["action"].split("(")[0] for s in tao_trace if s["sense_reason_act"] != "FINISH"],
             "cost_before": cost_before,
             "cost_after": final_cost,
             "trace": tao_trace,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
         }
+
+
+    

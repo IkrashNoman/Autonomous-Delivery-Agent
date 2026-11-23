@@ -106,3 +106,30 @@ def validate_dispatch_command(raw_payload, env):
         "blocked_cells": [],
         "reason": reason,
     }
+
+def validate_simulation_args(seed, slip_prob, max_steps):
+    """Check LLM-supplied simulate() arguments against safe ranges. Returns the normalised (seed, slip_prob, max_steps)."""
+    try:
+        seed = int(seed)
+        slip_prob = float(slip_prob)
+        max_steps = int(max_steps)
+    except (TypeError, ValueError) as exc:
+        raise DispatchValidationError(f"simulate() arguments must be numeric: {exc}") from exc
+    if not (0.0 <= slip_prob <= 0.6):
+        raise DispatchValidationError(f"slip_prob {slip_prob} is outside the allowed range [0.0, 0.6].")
+    if not (1 <= max_steps <= 120):
+        raise DispatchValidationError(f"max_steps {max_steps} is outside the allowed range [1, 120].")
+    return seed, slip_prob, max_steps
+
+
+def validate_inspect_args(t, max_t=120):
+    """Check the LLM-supplied time for inspect_closures(t). None means 'current time'."""
+    if t is None:
+        return None
+    try:
+        t = int(t)
+    except (TypeError, ValueError) as exc:
+        raise DispatchValidationError(f"inspect_closures t must be an integer: {exc}") from exc
+    if not (0 <= t <= max_t):
+        raise DispatchValidationError(f"inspect_closures t={t} is outside the allowed range [0, {max_t}].")
+    return t

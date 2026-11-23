@@ -7,8 +7,7 @@ import config
 from planners.state import custom_mst_heuristic
 from planners.informed.a_star_search import a_star
 from adversary.match_simulator import run_episode
-from dispatcher.schema import validate_dispatch_command, DispatchValidationError
-
+from dispatcher.schema import validate_dispatch_command, validate_simulation_args, validate_inspect_args
 
 class DispatcherToolkit:
     """
@@ -35,6 +34,8 @@ class DispatcherToolkit:
 
     def inspect_closures(self, t=None):
         """Custom Twist Tool: inspect active/upcoming road closures, rush-hour status, and rival distance."""
+        if self.enforce_guardrails:
+            t = validate_inspect_args(t)
         query_t = self.env.t if t is None else int(t)
         active = []
         upcoming = []
@@ -57,7 +58,7 @@ class DispatcherToolkit:
             "rival_dist": rival_dist,
             "remaining_stops": [s for s in self.env.stops if s not in self.env.delivered and s not in self.env.stolen],
         }
-
+    
     def add_avoid_zone(self, row=None, col=None, radius=0):
         """Validate and register an avoidance zone via schema guardrails."""
         if self.enforce_guardrails:
@@ -104,7 +105,8 @@ class DispatcherToolkit:
                     continue
                 adj_cost = cost * (self.rush_hour_boost if self.env.get_state()["rush_hour"] else 1.0)
                 res.append((nxt, adj_cost))
-            return res if res else [(pos, float(config.MIN_TERRAIN_COST))]
+            # No fallback wait: a trapped agent gets no successors, and the planner reports FAILED.
+            return res
 
         def priority_heuristic(state, stops):
             base_h = custom_mst_heuristic(state, stops)
@@ -112,7 +114,7 @@ class DispatcherToolkit:
                 idx = stops.index(self.priority_stop)
                 if not (state[2] & (1 << idx)):
                     dist_p = abs(state[0] - self.priority_stop[0]) + abs(state[1] - self.priority_stop[1])
-                    return base_h + dist_p * 1.5
+                    return max(base_h, dist_p * float(config.MIN_TERRAIN_COST))
             return base_h
 
         self.env.get_valid_neighbors = constrained_neighbors
@@ -133,9 +135,16 @@ class DispatcherToolkit:
 
     def simulate(self, seed=config.SEED, slip_prob=config.SLIP_PROBABILITY, max_steps=120):
         """
-        Non-destructive rollout simulator: snapshots current env state before running
-        the episode and restores exact state afterward so env.t and active plans remain intact.
+        Non-destructive rollout simulator: validates arguments (guardrails on), snapshots the
+        env, runs the episode, and restores exact state afterward (including slip_prob and planned_route).
         """
+        if self.enforce_guardrails:
+            seed, slip_prob, max_steps = validate_simulation_args(
+                config.SEED if seed is None else seed,
+                config.SLIP_PROBABILITY if slip_prob is None else slip_prob,
+                120 if max_steps is None else max_steps,
+            )
+
         snapshot = {
             "seed": self.env.seed,
             "rng_state": copy.deepcopy(self.env.rng.bit_generator.state),
@@ -147,9 +156,11 @@ class DispatcherToolkit:
             "total_cost": self.env.total_cost,
             "slip_count": self.env.slip_count,
             "rival_cooldown": self.env.rival_cooldown,
+            "slip_prob": self.env.slip_prob,
             "closure_seed": self.env.closure_mgr.seed,
             "closure_rng_state": copy.deepcopy(self.env.closure_mgr.rng.bit_generator.state),
             "closure_events": copy.deepcopy(self.env.closure_mgr.events),
+            "planned_route": list(self.env.closure_mgr.planned_route),
         }
         try:
             sim_res = run_episode(
@@ -157,7 +168,7 @@ class DispatcherToolkit:
                 seed=seed,
                 slip_prob=slip_prob,
                 max_steps=max_steps,
-                search_depth=3,
+                search_depth=int(config.ADVERSARY_SEARCH_DEPTH),
             )
         finally:
             self.env.seed = snapshot["seed"]
@@ -170,8 +181,11 @@ class DispatcherToolkit:
             self.env.total_cost = snapshot["total_cost"]
             self.env.slip_count = snapshot["slip_count"]
             self.env.rival_cooldown = snapshot["rival_cooldown"]
+            self.env.slip_prob = snapshot["slip_prob"]
             self.env.closure_mgr.seed = snapshot["closure_seed"]
             self.env.closure_mgr.rng.bit_generator.state = snapshot["closure_rng_state"]
             self.env.closure_mgr.events = snapshot["closure_events"]
+            self.env.closure_mgr.planned_route = snapshot["planned_route"]
 
         return sim_res
+    

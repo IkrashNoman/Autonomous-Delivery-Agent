@@ -13,9 +13,8 @@ from planners.state import (
     format_result,
 )
 
-
-def bfs(env, start_t=0):
-    """From-scratch Breadth-First Search (minimizes number of steps)."""
+def bfs(env, start_t=0, max_expansions=60000):
+    """From-scratch Breadth-First Search (minimizes number of steps), with an expansion budget."""
     tracemalloc.start()
     t0 = time.perf_counter()
 
@@ -36,6 +35,14 @@ def bfs(env, start_t=0):
                 "BFS", path, curr_cost, expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000
             )
 
+        if expanded >= max_expansions:
+            _, peak_bytes = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            return format_result(
+                "BFS", [], float("inf"), expanded, peak_bytes / 1024.0,
+                (time.perf_counter() - t0) * 1000, "BUDGET_LIMIT"
+            )
+
         for next_state, step_cost in expand_search_state(env, curr, curr_t):
             if next_state not in came_from:
                 came_from[next_state] = curr
@@ -43,4 +50,6 @@ def bfs(env, start_t=0):
 
     _, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    return format_result("BFS", [], float("inf"), expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000, "FAILED")
+    return format_result(
+        "BFS", [], float("inf"), expanded, peak_bytes / 1024.0, (time.perf_counter() - t0) * 1000, "FAILED"
+    )

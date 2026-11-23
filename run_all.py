@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import time
-import subprocess
+import numpy as np
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 FIGURES_DIR = os.path.join(ROOT_DIR, "figures")
@@ -11,188 +11,195 @@ sys.path.append(ROOT_DIR)
 import config
 from world.environment import GridWorldEnv
 from world.cost_map import benchmark_cost_map
-from planners.state import (
-    custom_mst_heuristic,
-    baseline_nearest_manhattan,
-    baseline_farthest_manhattan,
-    verify_heuristic_consistency,
-)
-from planners.uninformed.breadth_first_search import bfs
-from planners.uninformed.uniform_cost_search import ucs
-from planners.uninformed.depth_limited_search import dls
-from planners.uninformed.iterative_deepening_search import ids
-from planners.informed.greedy_best_first import greedy_best_first
-from planners.informed.a_star_search import a_star
-from planners.informed.weighted_a_star import weighted_a_star
-from adversary.game_search import benchmark_adversarial_pruning
-from adversary.match_simulator import run_episode
-from dispatcher.eval_suite import TEST_CASES_20
-from dispatcher.llm_dispatcher import LLMDispatcher
+from planners.benchmark import run_part_b_benchmarks
+from adversary.match_simulator import run_part_c_experiments, run_episode, _wilson_ci_95, _mean_ci_95
+from dispatcher.eval_suite import run_part_d_evaluation
 
 
-def run_part_a_and_b_full():
-    """Reproduce exact Part A cost-map speedup & Part B bound-closure benchmark (including DLS & IDS)."""
+def run_part_e_sweep_and_failure_analysis(part_b, part_c, part_d):
+    """
+    Part E: 30-scenario sensitivity sweep per configuration (seed = config.SEED + i, i=0..29)
+    reporting Win, Draw, Loss rates and Mean Cost +/- 95% CIs, plus a failure analysis whose
+    every number and claim is computed from this run (no fixed text).
+    """
+    num_scenarios = 30
+    depth_val = part_c["search_depth"]
+    best_weights = part_c["best_weights"]
+
+    print("\n" + "=" * 116)
     print(config.STAMP)
-    print("=" * 100)
-    print(f"PARTS A & B: COST-MAP SPEEDUP, CONSISTENCY & BOUND-CLOSURE BENCHMARK (Instance {config.INSTANCE_ID})")
-    print("=" * 100)
-
-    grid = config.load_grid()
-    cost_bench = benchmark_cost_map(grid, iterations=2000)
-
-    # Invoke planners/benchmark.py directly so exact Part B report tables are printed
-    bench_script = os.path.join(ROOT_DIR, "planners", "benchmark.py")
-    if os.path.isfile(bench_script):
-        subprocess.run([sys.executable, bench_script], check=False)
-
-    env = GridWorldEnv(seed=config.SEED)
-    cons_res = verify_heuristic_consistency(env)
-
-    # Bind dynamic closures against initial A* corridor (matching benchmark.py)
-    init_plan = a_star(env, custom_mst_heuristic, start_t=0)
-    if init_plan.get("path"):
-        env.closure_mgr.bind_route(init_plan["path"])
-
-    w_eps = getattr(
-        config,
-        "WEIGHTED_ASTAR_EPSILON",
-        getattr(config, "INADMISSIBLE_HEURISTIC_WEIGHT", 1.8),
-    )
-
-    algos = [
-        ("BFS", lambda e: bfs(e, start_t=0)),
-        ("UCS", lambda e: ucs(e, start_t=0)),
-        ("DLS (L=55)", lambda e: dls(e, depth_limit=55, start_t=0)),
-        ("IDS (max=65)", lambda e: ids(e, max_depth=65, start_t=0)),
-        ("Greedy Best-First", lambda e: greedy_best_first(e, custom_mst_heuristic, start_t=0)),
-        ("A* (Nearest-Manh)", lambda e: a_star(e, baseline_nearest_manhattan, start_t=0, label="A* (Nearest)")),
-        ("A* (Farthest-Manh)", lambda e: a_star(e, baseline_farthest_manhattan, start_t=0, label="A* (Farthest)")),
-        ("A* (Custom MST)", lambda e: a_star(e, custom_mst_heuristic, start_t=0, label="A* (Custom MST)")),
-        (f"Weighted A* (w={w_eps})", lambda e: weighted_a_star(e, custom_mst_heuristic, weight=w_eps, start_t=0)),
-    ]
-
-    summary_rows = []
-    for name, fn in algos:
-        res = fn(env)
-        summary_rows.append({
-            "algorithm": name,
-            "status": res["status"],
-            "cost": res["cost"] if res["cost"] != float("inf") else None,
-            "steps": res["steps"],
-            "nodes_expanded": res["nodes_expanded"],
-            "runtime_ms": res["runtime_ms"],
-            "peak_memory_kb": res["peak_memory_kb"],
-        })
-
-    opt_cost = next((r["cost"] for r in summary_rows if r["algorithm"] == "A* (Custom MST)"), None)
-    w_cost = next((r["cost"] for r in summary_rows if r["algorithm"].startswith("Weighted A*")), None)
-    inadmissible_gap = round(w_cost - opt_cost, 2) if (opt_cost is not None and w_cost is not None) else 0.0
-
-    return {
-        "cost_map_speedup": cost_bench,
-        "consistency": cons_res,
-        "algorithms": summary_rows,
-        "inadmissible_suboptimality_gap": inadmissible_gap,
-    }
-
-
-def run_part_c_full(num_games=config.NUM_RIVAL_GAMES):
-    """Run Part C pruning benchmark and 30-game stochastic adversarial tournament."""
-    print("\n" + "=" * 100)
-    print(f"PART C: MINIMAX VS ALPHA-BETA PRUNING & {num_games}-GAME TOURNAMENT (SEED BASE={config.SEED})")
-    print("=" * 100)
-
-    pruning_bench = benchmark_adversarial_pruning()
-
-    games = []
-    wins = losses = timeouts = 0
-    for g in range(num_games):
-        game_seed = config.SEED + g
-        env = GridWorldEnv(seed=game_seed)
-        res = run_episode(env, seed=game_seed, slip_prob=config.SLIP_PROBABILITY, max_steps=120, search_depth=3)
-        res["game_idx"] = g + 1
-        res["seed"] = game_seed
-        games.append(res)
-        if res["outcome"] == "WIN":
-            wins += 1
-        elif res["outcome"] == "LOSS":
-            losses += 1
-        else:
-            timeouts += 1
-
-    win_rate = round((wins / num_games) * 100.0, 2)
-    mean_cost = round(sum(x["total_cost"] for x in games) / num_games, 2)
-    mean_slips = round(sum(x["slips"] for x in games) / num_games, 2)
-    print(f"Tournament ({num_games} games): WIN={wins} ({win_rate}%), LOSS={losses}, TIMEOUT={timeouts} | Mean Cost={mean_cost} | Mean Slips={mean_slips}")
-
-    return {
-        "pruning_benchmark": pruning_bench,
-        "num_games": num_games,
-        "wins": wins,
-        "losses": losses,
-        "timeouts": timeouts,
-        "win_rate_pct": win_rate,
-        "mean_cost": mean_cost,
-        "mean_slips": mean_slips,
-        "games": games,
-    }
-
-
-def run_part_d_full(use_live_api=False):
-    """Run Part D 20-prompt ReAct benchmark + measured validation layer ablation."""
-    print("\n" + "=" * 100)
-    mode_label = "LIVE_GROQ_API" if use_live_api else "DETERMINISTIC_OFFLINE"
-    print(f"PART D: REACT DISPATCHER & GUARDRAIL EVALUATION ({mode_label})")
-    print("=" * 100)
-
-    records = []
-    for tc in TEST_CASES_20:
-        env = GridWorldEnv(seed=config.SEED)
-        agent = LLMDispatcher(env=env, use_live_api=use_live_api, enforce_guardrails=True, request_delay_sec=2.1)
-        res = agent.dispatch(tc["prompt"])
-        tools_ok = all(rt in res.get("tools_used", []) for rt in tc["req_tools"])
-        full_pass = (res["status"] == tc["expected"]) and tools_ok
-        records.append({
-            "id": tc["id"],
-            "tier": tc["tier"],
-            "source": res.get("source"),
-            "expected": tc["expected"],
-            "actual": res["status"],
-            "full_pass": full_pass,
-            "tool_calls": res["tool_calls"],
-            "cost_before": res["cost_before"],
-            "cost_after": res["cost_after"],
-            "latency_ms": res["latency_ms"],
-        })
-
-    unsafe_cases = [tc for tc in TEST_CASES_20 if tc["expected"] == "REJECTED"]
-    unvalidated_blocked = 0
-    for tc in unsafe_cases:
-        env_raw = GridWorldEnv(seed=config.SEED)
-        raw_agent = LLMDispatcher(env=env_raw, use_live_api=False, enforce_guardrails=False, request_delay_sec=0.0)
-        if raw_agent.dispatch(tc["prompt"])["status"] == "REJECTED":
-            unvalidated_blocked += 1
-
-    guarded_blocked = sum(1 for r in records if r["expected"] == "REJECTED" and r["actual"] == "REJECTED")
-    full_pass_count = sum(1 for r in records if r["full_pass"])
+    print(f"PART E: 30-SCENARIO SENSITIVITY SWEEP & FAILURE ANALYSIS (Instance {config.INSTANCE_ID}, Depth={depth_val})")
+    print("=" * 116)
     print(
-        f"20-Prompt Full-Pass: {full_pass_count}/20 | "
-        f"Guardrail Ablation: Unvalidated Blocked={unvalidated_blocked}/{len(unsafe_cases)} vs Guarded Blocked={guarded_blocked}/{len(unsafe_cases)}"
+        f"{'Slip':<6} {'N':<4} {'Win% (95% CI)':<22} {'Draw% (95% CI)':<22} {'Loss% (95% CI)':<22} "
+        f"{'Mean Cost +/- 95% CI':<24} {'Slips':>7}"
+    )
+    print("-" * 116)
+
+    slip_levels = [0.0, 0.13, 0.26, 0.40]
+    sweep_rows = []
+    for sp in slip_levels:
+        episodes = []
+        wins = draws = losses = 0
+        for i in range(num_scenarios):
+            sc_seed = config.SEED + i
+            env = GridWorldEnv(seed=sc_seed)
+            ep = run_episode(
+                env,
+                seed=sc_seed,
+                slip_prob=sp,
+                search_depth=depth_val,
+                weights=best_weights,
+            )
+            episodes.append(ep)
+            if ep["outcome"] == "WIN":
+                wins += 1
+            elif ep["outcome"] == "DRAW":
+                draws += 1
+            else:
+                losses += 1
+
+        wr = round((wins / num_scenarios) * 100.0, 2)
+        dr = round((draws / num_scenarios) * 100.0, 2)
+        lr = round((losses / num_scenarios) * 100.0, 2)
+
+        w_ci = _wilson_ci_95(wins, num_scenarios)
+        d_ci = _wilson_ci_95(draws, num_scenarios)
+        l_ci = _wilson_ci_95(losses, num_scenarios)
+
+        m_cost, c_half = _mean_ci_95([x["total_cost"] for x in episodes])
+        m_slips, s_half = _mean_ci_95([x["slips"] for x in episodes])
+        m_rep, _ = _mean_ci_95([x["replans"] for x in episodes])
+
+        row = {
+            "slip_prob": sp,
+            "num_scenarios": num_scenarios,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "win_rate_pct": wr,
+            "win_wilson_ci95": list(w_ci),
+            "draw_rate_pct": dr,
+            "draw_wilson_ci95": list(d_ci),
+            "loss_rate_pct": lr,
+            "loss_wilson_ci95": list(l_ci),
+            "mean_cost": m_cost,
+            "mean_cost_ci95_half": c_half,
+            "mean_slips": m_slips,
+            "mean_slips_ci95_half": s_half,
+            "mean_replans": m_rep,
+            "seed0_episode": episodes[0],
+        }
+        sweep_rows.append(row)
+
+        w_str = f"{wr:.1f}% [{w_ci[0]:.1f},{w_ci[1]:.1f}]"
+        d_str = f"{dr:.1f}% [{d_ci[0]:.1f},{d_ci[1]:.1f}]"
+        l_str = f"{lr:.1f}% [{l_ci[0]:.1f},{l_ci[1]:.1f}]"
+        c_str = f"{m_cost:.1f} +/- {c_half:.1f}"
+        print(f"{sp:<6.2f} {num_scenarios:<4} {w_str:<22} {d_str:<22} {l_str:<22} {c_str:<24} {m_slips:>7.2f}")
+
+    print("-" * 116)
+
+    # ---------- Computed failure analysis (every figure comes from this run) ----------
+    t_res = part_c["tournament"]
+    n_games = t_res["num_games"]
+    s0 = sweep_rows[0]
+
+    opt_row = next((r for r in part_b["algorithms"] if r["algorithm"] == "A* (Custom MST)"), None)
+    wa_row = next((r for r in part_b["algorithms"] if r["algorithm"].startswith("Weighted A*")), None)
+    dls_row = next((r for r in part_b["algorithms"] if r["algorithm"].startswith("DLS")), None)
+    ids_row = next((r for r in part_b["algorithms"] if r["algorithm"].startswith("IDS")), None)
+    cap_row = next((r for r in part_b["algorithms"] if "mem cap" in r["algorithm"]), None)
+
+    def _status_text(r):
+        if r is None:
+            return "not run"
+        return f"{r['status']} after {r['nodes_expanded']} expansions"
+
+    if opt_row and wa_row and opt_row["nodes_expanded"]:
+        wa_saving = (1.0 - wa_row["nodes_expanded"] / opt_row["nodes_expanded"]) * 100.0
+        wa_text = (
+            f"{wa_row['algorithm']} expanded {wa_row['nodes_expanded']} nodes "
+            f"({wa_saving:.1f}% fewer than optimal A* with {opt_row['nodes_expanded']}), "
+            f"cost {wa_row['cost']} vs optimal {opt_row['cost']} (gap +{part_b['inadmissible_suboptimality_gap']})."
+        )
+    else:
+        wa_text = "weighted A* comparison unavailable."
+    opt_text = (
+        f"Optimal A* found a {opt_row['steps']}-step plan of cost {opt_row['cost']}."
+        if opt_row and opt_row["cost"] is not None
+        else "Optimal A* result unavailable."
     )
 
-    return {
-        "mode": mode_label,
-        "full_pass_count": full_pass_count,
-        "total_prompts": len(records),
-        "unvalidated_blocked": unvalidated_blocked,
-        "guarded_blocked": guarded_blocked,
-        "total_unsafe": len(unsafe_cases),
-        "records": records,
+    part_b_text = (
+        f"{opt_text} {wa_text} Uninformed search: DLS is {_status_text(dls_row)}; "
+        f"IDS is {_status_text(ids_row)}. "
+        f"Optimal A* under the memory cap of {config.IDS_MEMORY_LIMIT_STATES} stored states: {_status_text(cap_row)}."
+    )
+
+    draws = t_res["draws"]
+    part_c_text = (
+        f"Across {n_games} stochastic games at depth {depth_val}: "
+        f"WIN={t_res['wins']}/{n_games} ({t_res['win_rate_pct']}%, Wilson CI {t_res['win_wilson_ci95_pct']}), "
+        f"DRAW={draws}/{n_games} ({t_res['draw_rate_pct']}%, Wilson CI {t_res['draw_wilson_ci95_pct']}), "
+        f"LOSS={t_res['losses']}/{n_games} ({t_res['loss_rate_pct']}%, Wilson CI {t_res['loss_wilson_ci95_pct']}). "
+        f"Mean cost {t_res['mean_cost']} +/- {t_res['mean_cost_ci95_half']}. "
+        f"Deterministic (slip=0.00) wins in this sweep: {s0['wins']}/{num_scenarios}."
+    )
+
+    win_series = [r["win_rate_pct"] for r in sweep_rows]
+    cost_series = [r["mean_cost"] for r in sweep_rows]
+    peak = sweep_rows[int(np.argmax(win_series))]
+    win_monotone = (
+        all(b >= a for a, b in zip(win_series, win_series[1:]))
+        or all(b <= a for a, b in zip(win_series, win_series[1:]))
+    )
+    cost_monotone = all(b >= a for a, b in zip(cost_series, cost_series[1:]))
+    sweep_text = (
+        "Win rate by slip: " + ", ".join(f"{r['slip_prob']:.2f} -> {r['win_rate_pct']}%" for r in sweep_rows)
+        + f". Peak at slip={peak['slip_prob']:.2f}. "
+        + ("Win rate is monotone in slip. " if win_monotone else "Win rate is NOT monotone in slip. ")
+        + "Mean cost by slip: " + ", ".join(f"{r['mean_cost']}" for r in sweep_rows)
+        + (". Mean cost increases monotonically with slip." if cost_monotone else ". Mean cost is NOT monotone in slip.")
+    )
+
+    failed = [r for r in part_d["records"] if not r["full_pass"]]
+    failed_text = (
+        "; ".join(
+            f"{r['id']} (expected {r['expected']}, actual {r['actual']}, source {r['source']})" for r in failed
+        ) or "none"
+    )
+    offline_ids = [r["id"] for r in part_d["records"] if r.get("source") == "OFFLINE_FALLBACK"]
+    part_d_text = (
+        f"Mode={part_d['mode']} | Full-pass={part_d['full_pass_count']}/{part_d['total_prompts']} | "
+        f"Live API calls={part_d['total_api_calls']} | Offline fallbacks={len(offline_ids)} {offline_ids}. "
+        f"Failed prompts: {failed_text}. "
+        f"With schema guardrails: {part_d['guarded_blocked']}/{part_d['total_unsafe']} schema-relevant unsafe prompts blocked "
+        f"(unsafe actions executed: {part_d.get('guarded_leaks', 'n/a')}). "
+        f"Without schema guardrails: {part_d['unvalidated_blocked']}/{part_d['total_unsafe']} blocked "
+        f"(unsafe actions executed: {part_d.get('unguarded_leaks', 'n/a')})."
+    )
+
+    failure_analysis = {
+        "part_b_search_failures": part_b_text,
+        "part_c_adversarial_failures": part_c_text,
+        "part_d_llm_and_guardrail_failures": part_d_text,
+        "part_e_sensitivity_findings": sweep_text,
     }
 
+    print("\nDETAILED MULTI-PART FAILURE ANALYSIS:")
+    print(config.STAMP)
+    for section, narrative in failure_analysis.items():
+        print(f"  [{section}] {narrative}")
+    print("=" * 116)
 
-def save_figures(part_ab, part_c, part_d):
-    """Generate 4 publication-grade report figures in figures/."""
+    return {"slip_sensitivity_sweep": sweep_rows, "failure_analysis": failure_analysis}
+
+
+    
+
+def save_figures(part_b, part_c, part_d, part_e):
+    """Generate 4 stamped, publication-grade report figures in figures/."""
     os.makedirs(FIGURES_DIR, exist_ok=True)
     generated = []
     try:
@@ -203,12 +210,12 @@ def save_figures(part_ab, part_c, part_d):
         print("Warning: matplotlib not installed; skipping PNG chart rendering.")
         return generated
 
-    # Figure 1: Expanded Nodes across Search Algorithms
-    algos = [r["algorithm"] for r in part_ab["algorithms"]]
-    nodes = [r["nodes_expanded"] for r in part_ab["algorithms"]]
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    # Figure 1: Expanded Nodes across Search Algorithms (Part B)
+    algos = [r["algorithm"] for r in part_b["algorithms"]]
+    nodes = [r["nodes_expanded"] for r in part_b["algorithms"]]
+    fig, ax = plt.subplots(figsize=(9.5, 4.8))
     ax.bar(algos, nodes, color="#2563eb")
-    ax.set_title(f"Expanded Nodes by Search Algorithm (Instance {config.INSTANCE_ID})")
+    ax.set_title(f"Part B: Expanded Nodes by Search Algorithm (Instance {config.INSTANCE_ID})\n{config.STAMP}", fontsize=9.5)
     ax.set_ylabel("Nodes Expanded")
     plt.xticks(rotation=30, ha="right")
     plt.tight_layout()
@@ -217,58 +224,52 @@ def save_figures(part_ab, part_c, part_d):
     plt.close(fig)
     generated.append(f1)
 
-    # Figure 2: Minimax vs Alpha-Beta Node Savings
-    pb = part_c.get("pruning_benchmark") or {}
-    if isinstance(pb, dict) and "minimax_nodes" in pb and "alphabeta_nodes" in pb:
-        fig, ax = plt.subplots(figsize=(6.5, 4))
-        ax.bar(
-            ["Minimax (Unpruned)", "Alpha-Beta (Move-Ordered)"],
-            [pb["minimax_nodes"], pb["alphabeta_nodes"]],
-            color=["#f59e0b", "#16a34a"],
-        )
-        ax.set_title("Part C: Minimax vs Alpha-Beta Search Nodes")
+    # Figure 2: Minimax vs Alpha-Beta Pruning across Depths 2..5 (Part C)
+    pb = part_c.get("pruning_benchmark") or []
+    if pb:
+        depths = [f"Depth {r['depth']}" for r in pb]
+        mm_nodes = [r["minimax_nodes"] for r in pb]
+        ab_nodes = [r["alphabeta_nodes"] for r in pb]
+        x = range(len(depths))
+        fig, ax = plt.subplots(figsize=(7.8, 4.5))
+        ax.bar([i - 0.18 for i in x], mm_nodes, width=0.35, label="Minimax (Unpruned)", color="#f59e0b")
+        ax.bar([i + 0.18 for i in x], ab_nodes, width=0.35, label="Alpha-Beta (Ordered)", color="#16a34a")
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(depths)
         ax.set_ylabel("Nodes Evaluated")
+        ax.set_title(f"Part C: Minimax vs Alpha-Beta Pruning (Depths 2–{max(r['depth'] for r in pb)})\n{config.STAMP}", fontsize=9.5)
+        ax.legend()
         plt.tight_layout()
         f2 = os.path.join(FIGURES_DIR, "fig2_minimax_vs_alphabeta.png")
         fig.savefig(f2, dpi=180)
         plt.close(fig)
         generated.append(f2)
-    else:
-        valid = [r for r in part_ab["algorithms"] if r["cost"] is not None]
-        fig, ax = plt.subplots(figsize=(8.5, 4.2))
-        ax.bar([r["algorithm"] for r in valid], [r["cost"] for r in valid], color="#16a34a")
-        ax.set_title("Part B: Total Path Cost Comparison")
-        ax.set_ylabel("Total Path Cost")
-        plt.xticks(rotation=25, ha="right")
-        plt.tight_layout()
-        f2 = os.path.join(FIGURES_DIR, "fig2_path_cost.png")
-        fig.savefig(f2, dpi=180)
-        plt.close(fig)
-        generated.append(f2)
 
-    # Figure 3: Part C 30-Game Adversarial Outcomes
-    fig, ax = plt.subplots(figsize=(6, 4))
-    labels = ["WIN", "LOSS", "TIMEOUT"]
-    counts = [part_c["wins"], part_c["losses"], part_c["timeouts"]]
-    ax.bar(labels, counts, color=["#22c55e", "#ef4444", "#f59e0b"])
-    ax.set_title(f"Part C Adversarial Tournament Outcomes ({part_c['num_games']} Games)")
-    ax.set_ylabel("Episode Count")
+    # Figure 3: Part E 30-Scenario Slip Sensitivity Sweep (Mean Cost +/- 95% CI)
+    sw = part_e["slip_sensitivity_sweep"]
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    slips = [f"slip={r['slip_prob']:.2f}" for r in sw]
+    means = [r["mean_cost"] for r in sw]
+    errs = [r["mean_cost_ci95_half"] for r in sw]
+    ax.bar(slips, means, yerr=errs, capsize=5, color="#0284c7")
+    ax.set_ylabel("Mean Episode Cost (+/- 95% CI)")
+    ax.set_title(f"Part E: 30-Scenario Slip Sensitivity Sweep (Depth={part_c['search_depth']})\n{config.STAMP}", fontsize=9.5)
     plt.tight_layout()
-    f3 = os.path.join(FIGURES_DIR, "fig3_adversarial_outcomes.png")
+    f3 = os.path.join(FIGURES_DIR, "fig3_slip_sensitivity_sweep.png")
     fig.savefig(f3, dpi=180)
     plt.close(fig)
     generated.append(f3)
 
     # Figure 4: Part D Validation Layer Safety Ablation
-    fig, ax = plt.subplots(figsize=(6.5, 4))
+    fig, ax = plt.subplots(figsize=(7.0, 4.4))
     ax.bar(
         ["Without Schema Guardrails", "With Schema Guardrails"],
         [part_d["unvalidated_blocked"], part_d["guarded_blocked"]],
         color=["#dc2626", "#2563eb"],
     )
     ax.set_ylim(0, part_d["total_unsafe"] + 1)
-    ax.set_ylabel("Unsafe / Adversarial Prompts Blocked (out of 8)")
-    ax.set_title("Part D Validation Layer Ablation")
+    ax.set_ylabel(f"Unsafe Prompts Blocked (out of {part_d['total_unsafe']})")
+    ax.set_title(f"Part D: Validation Layer Safety Ablation\n{config.STAMP}", fontsize=9.5)
     plt.tight_layout()
     f4 = os.path.join(FIGURES_DIR, "fig4_guardrail_ablation.png")
     fig.savefig(f4, dpi=180)
@@ -282,19 +283,23 @@ def main():
     t_start = time.perf_counter()
     use_live = "--live" in sys.argv
 
-    part_ab = run_part_a_and_b_full()
-    part_c = run_part_c_full(num_games=config.NUM_RIVAL_GAMES)
-    part_d = run_part_d_full(use_live_api=use_live)
-    figures = save_figures(part_ab, part_c, part_d)
+    part_a = benchmark_cost_map(config.load_grid(), iterations=2000)
+    part_b = run_part_b_benchmarks()
+    part_c = run_part_c_experiments(num_games=config.NUM_RIVAL_GAMES, search_depth=config.ADVERSARY_SEARCH_DEPTH)
+    part_d = run_part_d_evaluation(use_live_api=use_live)
+    part_e = run_part_e_sweep_and_failure_analysis(part_b, part_c, part_d)
+    figures = save_figures(part_b, part_c, part_d, part_e)
 
     total_sec = round(time.perf_counter() - t_start, 2)
     artifact = {
         "stamp": config.STAMP,
         "instance_id": config.INSTANCE_ID,
         "seed": config.SEED,
-        "part_ab": part_ab,
+        "part_a": part_a,
+        "part_b": part_b,
         "part_c": part_c,
         "part_d": part_d,
+        "part_e": part_e,
         "generated_figures": figures,
         "total_reproduction_time_sec": total_sec,
     }
@@ -302,12 +307,13 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
 
-    print("\n" + "=" * 100)
-    print(f"ALL PARTS (A–D) VERIFIED IN {total_sec}s")
+    print("\n" + "=" * 116)
+    print(config.STAMP)
+    print(f"ALL PARTS (A–E) VERIFIED IN {total_sec}s")
     print(f"  - Consolidated JSON Artifact : {out_path}")
-    print(f"  - Generated Report Figures   : {len(figures)} PNGs in {FIGURES_DIR}")
+    print(f"  - Generated Stamped Figures  : {len(figures)} PNGs in {FIGURES_DIR}")
     print("  - Part E Interactive Web UI  : python web/server.py (http://127.0.0.1:8000)")
-    print("=" * 100)
+    print("=" * 116)
 
 
 if __name__ == "__main__":

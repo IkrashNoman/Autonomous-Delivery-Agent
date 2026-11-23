@@ -1,234 +1,220 @@
 import os
 import sys
 import time
+import math
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from adversary.evaluation import evaluate_game_state, DEFAULT_WEIGHTS
+from adversary.evaluation import evaluate_game_state
 
 
-def _in_local_window(pos, center, radius=config.LOCAL_GAME_WINDOW_RADIUS):
-    """Restrict adversarial lookahead to a local Manhattan window around center."""
-    return abs(pos[0] - center[0]) + abs(pos[1] - center[1]) <= radius
+def _order_moves(moves, target_pos, maximizing=True):
+    """Move ordering heuristic: sort candidate positions by Manhattan distance to target_pos."""
+    return sorted(
+        moves,
+        key=lambda pos: abs(pos[0] - target_pos[0]) + abs(pos[1] - target_pos[1]),
+        reverse=not maximizing,
+    )
 
 
-def _simulate_joint_ply(env, state_tuple, agent_next, rival_next):
-    """Deterministic joint transition used inside Minimax and Alpha-Beta trees."""
-    _, _, delivered, stolen, t, rival_cooldown = state_tuple
-    new_delivered = set(delivered)
-    new_stolen = set(stolen)
-
-    if agent_next in env.stops and agent_next not in new_delivered and agent_next not in new_stolen:
-        new_delivered.add(agent_next)
-
-    new_cooldown = rival_cooldown
-    if new_cooldown > 0:
-        new_cooldown -= 1
-    elif "rival_steals_parcels" in config.TWISTS:
-        active_stops = [s for s in env.stops if s not in new_delivered and s not in new_stolen]
-        if rival_next in active_stops:
-            new_stolen.add(rival_next)
-            new_cooldown = 3
-        elif rival_next == agent_next and active_stops:
-            nearest = min(active_stops, key=lambda s: abs(s[0] - agent_next[0]) + abs(s[1] - agent_next[1]))
-            new_stolen.add(nearest)
-            new_cooldown = 3
-
-    return (agent_next, rival_next, frozenset(new_delivered), frozenset(new_stolen), t + 1, new_cooldown)
-
-
-def _get_ordered_agent_moves(env, state_tuple, center, weights):
-    """MAX move ordering: sort legal agent moves by static evaluation descending."""
-    agent_pos, rival_pos, delivered, stolen, t, _ = state_tuple
-    candidates = []
-    for nxt, _ in env.get_valid_neighbors(agent_pos, t):
-        if _in_local_window(nxt, center):
-            preview = _simulate_joint_ply(env, state_tuple, nxt, rival_pos)
-            candidates.append((evaluate_game_state(env, preview, weights), nxt))
-
-    if not candidates:
-        candidates.append((0.0, agent_pos))
-
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return [nxt for _, nxt in candidates]
-
-
-def _get_ordered_rival_moves(env, state_tuple, center):
-    """
-    MIN move ordering: uses env.get_valid_rival_moves (which always includes rival_pos stay)
-    within the rival's local radius and orders moves closing distance to agent/active stops first.
-    """
-    agent_pos, rival_pos, delivered, stolen, t, rival_cooldown = state_tuple
-    if rival_cooldown > 0:
-        return [rival_pos]
-
-    active_stops = [s for s in env.stops if s not in delivered and s not in stolen]
-    targets = [agent_pos] + active_stops
-
-    candidates = []
-    for nxt in env.get_valid_rival_moves(rival_pos, t):
-        if _in_local_window(nxt, rival_pos, radius=config.LOCAL_GAME_WINDOW_RADIUS):
-            min_target_dist = min(abs(nxt[0] - tr) + abs(nxt[1] - tc) for tr, tc in targets)
-            candidates.append((min_target_dist, nxt))
-
-    if not candidates:
-        candidates.append((0, rival_pos))
-
-    candidates.sort(key=lambda item: item[0])
-    return [nxt for _, nxt in candidates]
-
-
-def _apply_agent_half_ply(env, state_tuple, a_nxt):
-    """Apply MAX's move and immediately credit parcel delivery if a_nxt is an active stop."""
-    _, rival_pos, delivered, stolen, t, rival_cooldown = state_tuple
-    new_delivered = set(delivered)
-    if a_nxt in env.stops and a_nxt not in new_delivered and a_nxt not in stolen:
-        new_delivered.add(a_nxt)
-    return (a_nxt, rival_pos, frozenset(new_delivered), stolen, t + 1, rival_cooldown)
-
-
-def minimax_search(env, state_tuple, depth, maximizing, center, weights, stats):
-    """From-scratch Minimax search without pruning."""
+def minimax_search(env, agent_pos, rival_pos, delivered, stolen, t, rival_cooldown, depth, maximizing, stats, weights=None):
+    """Unpruned depth-limited Minimax search over the local tactical window."""
     stats["nodes"] += 1
-    agent_pos, rival_pos, delivered, stolen, t, _ = state_tuple
-    if depth == 0 or len(delivered) + len(stolen) == len(env.stops):
-        return evaluate_game_state(env, state_tuple, weights), agent_pos
+    rem_count = len(env.stops) - len(delivered) - len(stolen)
+    if depth == 0 or rem_count == 0:
+        state_tuple = (agent_pos, rival_pos, delivered, stolen, t, rival_cooldown)
+        return evaluate_game_state(env, state_tuple, weights=weights), agent_pos if maximizing else rival_pos
 
     if maximizing:
-        best_val = -float("inf")
+        best_val = -math.inf
         best_move = agent_pos
-        for a_nxt in _get_ordered_agent_moves(env, state_tuple, center, weights):
-            mid_state = _apply_agent_half_ply(env, state_tuple, a_nxt)
-            val, _ = minimax_search(env, mid_state, depth - 1, False, center, weights, stats)
+        for nxt_a, _ in env.get_valid_neighbors(agent_pos, t):
+            new_del = set(delivered)
+            if nxt_a in env.stops and nxt_a not in stolen:
+                new_del.add(nxt_a)
+            val, _ = minimax_search(
+                env, nxt_a, rival_pos, new_del, stolen, t, rival_cooldown, depth - 1, False, stats, weights
+            )
             if val > best_val:
                 best_val = val
-                best_move = a_nxt
+                best_move = nxt_a
         return best_val, best_move
     else:
-        best_val = float("inf")
+        best_val = math.inf
         best_move = rival_pos
-        for r_nxt in _get_ordered_rival_moves(env, state_tuple, center):
-            # Restore t before joint rival resolution so time increments once per full round
-            pre_rival_state = (agent_pos, rival_pos, delivered, stolen, max(0, t - 1), state_tuple[5])
-            next_state = _simulate_joint_ply(env, pre_rival_state, agent_pos, r_nxt)
-            val, _ = minimax_search(env, next_state, depth - 1, True, center, weights, stats)
+        for nxt_r in env.get_valid_rival_moves(rival_pos, t):
+            new_stolen = set(stolen)
+            new_cd = max(0, rival_cooldown - 1)
+            if rival_cooldown == 0:
+                active = [s for s in env.stops if s not in delivered and s not in new_stolen]
+                if nxt_r in active:
+                    new_stolen.add(nxt_r)
+                    new_cd = 3
+            val, _ = minimax_search(
+                env, agent_pos, nxt_r, delivered, new_stolen, t + 1, new_cd, depth - 1, True, stats, weights
+            )
             if val < best_val:
                 best_val = val
-                best_move = r_nxt
+                best_move = nxt_r
         return best_val, best_move
 
 
-def alphabeta_search(env, state_tuple, depth, alpha, beta, maximizing, center, weights, stats):
-    """From-scratch Alpha-Beta Pruning search with domain move ordering."""
+def alphabeta_search(
+    env, agent_pos, rival_pos, delivered, stolen, t, rival_cooldown, depth, alpha, beta, maximizing, stats, weights=None
+):
+    """Alpha-Beta pruned depth-limited game tree search with Manhattan move ordering."""
     stats["nodes"] += 1
-    agent_pos, rival_pos, delivered, stolen, t, _ = state_tuple
-    if depth == 0 or len(delivered) + len(stolen) == len(env.stops):
-        return evaluate_game_state(env, state_tuple, weights), agent_pos
+    rem_count = len(env.stops) - len(delivered) - len(stolen)
+    if depth == 0 or rem_count == 0:
+        state_tuple = (agent_pos, rival_pos, delivered, stolen, t, rival_cooldown)
+        return evaluate_game_state(env, state_tuple, weights=weights), agent_pos if maximizing else rival_pos
+
+    rem_stops = [s for s in env.stops if s not in delivered and s not in stolen]
 
     if maximizing:
-        best_val = -float("inf")
+        best_val = -math.inf
         best_move = agent_pos
-        for a_nxt in _get_ordered_agent_moves(env, state_tuple, center, weights):
-            mid_state = _apply_agent_half_ply(env, state_tuple, a_nxt)
-            val, _ = alphabeta_search(env, mid_state, depth - 1, alpha, beta, False, center, weights, stats)
+        target = min(rem_stops, key=lambda s: abs(s[0] - agent_pos[0]) + abs(s[1] - agent_pos[1])) if rem_stops else agent_pos
+        raw_moves = [nxt for nxt, _ in env.get_valid_neighbors(agent_pos, t)]
+        ordered_moves = _order_moves(raw_moves, target, maximizing=True)
+
+        for nxt_a in ordered_moves:
+            new_del = set(delivered)
+            if nxt_a in env.stops and nxt_a not in stolen:
+                new_del.add(nxt_a)
+            val, _ = alphabeta_search(
+                env, nxt_a, rival_pos, new_del, stolen, t, rival_cooldown, depth - 1, alpha, beta, False, stats, weights
+            )
             if val > best_val:
                 best_val = val
-                best_move = a_nxt
+                best_move = nxt_a
             alpha = max(alpha, best_val)
             if beta <= alpha:
+                stats["cutoffs"] += 1
                 break
         return best_val, best_move
     else:
-        best_val = float("inf")
+        best_val = math.inf
         best_move = rival_pos
-        for r_nxt in _get_ordered_rival_moves(env, state_tuple, center):
-            pre_rival_state = (agent_pos, rival_pos, delivered, stolen, max(0, t - 1), state_tuple[5])
-            next_state = _simulate_joint_ply(env, pre_rival_state, agent_pos, r_nxt)
-            val, _ = alphabeta_search(env, next_state, depth - 1, alpha, beta, True, center, weights, stats)
+        target = min(rem_stops, key=lambda s: abs(s[0] - rival_pos[0]) + abs(s[1] - rival_pos[1])) if rem_stops else agent_pos
+        raw_moves = env.get_valid_rival_moves(rival_pos, t)
+        ordered_moves = _order_moves(raw_moves, target, maximizing=False)
+
+        for nxt_r in ordered_moves:
+            new_stolen = set(stolen)
+            new_cd = max(0, rival_cooldown - 1)
+            if rival_cooldown == 0:
+                active = [s for s in env.stops if s not in delivered and s not in new_stolen]
+                if nxt_r in active:
+                    new_stolen.add(nxt_r)
+                    new_cd = 3
+            val, _ = alphabeta_search(
+                env, agent_pos, nxt_r, delivered, new_stolen, t + 1, new_cd, depth - 1, alpha, beta, True, stats, weights
+            )
             if val < best_val:
                 best_val = val
-                best_move = r_nxt
+                best_move = nxt_r
             beta = min(beta, best_val)
             if beta <= alpha:
+                stats["cutoffs"] += 1
                 break
         return best_val, best_move
+
 
 def choose_agent_and_rival_moves(env, depth=config.ADVERSARY_SEARCH_DEPTH, weights=None):
     """
-    Select next grid coordinates for MAX (agent) and MIN (rival) via Alpha-Beta.
-    Always returns a valid rival coordinate (returning env.rival_pos during cooldown).
+    Compute best tactical move for Agent (MAX root) and Rival (MIN root) via Alpha-Beta pruning.
+    Because GridWorldEnv.step() executes simultaneous moves within step t, the MIN root
+    evaluates the rival's counter-response at step t with depth max(1, depth - 1) so both
+    searches terminate on the same terminal ply.
     """
-    w = DEFAULT_WEIGHTS if weights is None else weights
-    state_tuple = (
+    stats_a = {"nodes": 0, "cutoffs": 0}
+    _, best_a = alphabeta_search(
+        env,
         env.agent_pos,
         env.rival_pos,
-        frozenset(env.delivered),
-        frozenset(env.stolen),
+        set(env.delivered),
+        set(env.stolen),
         env.t,
         env.rival_cooldown,
+        depth,
+        -math.inf,
+        math.inf,
+        True,
+        stats_a,
+        weights,
     )
-    center = env.agent_pos
 
-    stats_max = {"nodes": 0}
-    _, best_agent_pos = alphabeta_search(
-        env, state_tuple, depth, -float("inf"), float("inf"), True, center, w, stats_max
-    )
-
-    if env.rival_cooldown > 0:
-        best_rival_pos = env.rival_pos
-    else:
-        stats_min = {"nodes": 0}
-        _, best_rival_pos = alphabeta_search(
-            env, state_tuple, depth, -float("inf"), float("inf"), False, center, w, stats_min
-        )
-
-    return best_agent_pos, best_rival_pos
-
-
-def compare_minimax_vs_alphabeta(env, weights=None):
-    """Measure node expansions for depths 2 to ADVERSARY_SEARCH_DEPTH and pruning savings."""
-    w = DEFAULT_WEIGHTS if weights is None else weights
-
-    # Position rival on a valid traversable cell within tactical engagement distance (~4 steps)
-    contested_rival = env.rival_pos
-    for r in range(env.rows):
-        for c in range(env.cols):
-            if env.grid[r, c] >= 0 and (r, c) != env.agent_pos:
-                if abs(r - env.agent_pos[0]) + abs(c - env.agent_pos[1]) == 4:
-                    contested_rival = (r, c)
-                    break
-        if contested_rival != env.rival_pos:
-            break
-
-    state_tuple = (
+    stats_r = {"nodes": 0, "cutoffs": 0}
+    _, best_r = alphabeta_search(
+        env,
         env.agent_pos,
-        contested_rival,
-        frozenset(env.delivered),
-        frozenset(env.stolen),
+        env.rival_pos,
+        set(env.delivered),
+        set(env.stolen),
         env.t,
-        0,
+        env.rival_cooldown,
+        max(1, depth - 1),
+        -math.inf,
+        math.inf,
+        False,
+        stats_r,
+        weights,
     )
-    center = env.agent_pos
+    return best_a, best_r
+
+
+def benchmark_adversarial_pruning(env=None, depths=None):
+    """Benchmark unpruned Minimax vs Alpha-Beta pruning for depths 2 through ADVERSARY_SEARCH_DEPTH (5)."""
+    from world.environment import GridWorldEnv
+
+    if env is None:
+        env = GridWorldEnv(seed=config.SEED)
+    if depths is None:
+        depths = tuple(range(2, int(config.ADVERSARY_SEARCH_DEPTH) + 1))
+
+    print(config.STAMP)
+    print("-" * 92)
+    print(f"Part C Benchmark: Unpruned Minimax vs Alpha-Beta Pruning (Instance {config.INSTANCE_ID}, Max Depth={max(depths)})")
+    print(f"{'Depth':<8} {'Minimax Nodes':>15} {'Alpha-Beta Nodes':>18} {'Reduction':>12} {'MM Time(ms)':>14} {'AB Time(ms)':>14}")
+    print("-" * 92)
 
     rows = []
-    for d in range(2, config.ADVERSARY_SEARCH_DEPTH + 1):
+    for d in depths:
+        s_mm = {"nodes": 0, "cutoffs": 0}
         t0 = time.perf_counter()
-        mm_stats = {"nodes": 0}
-        minimax_search(env, state_tuple, d, True, center, w, mm_stats)
-        mm_ms = (time.perf_counter() - t0) * 1000
+        minimax_search(
+            env, env.agent_pos, env.rival_pos, set(env.delivered), set(env.stolen), env.t, env.rival_cooldown, d, True, s_mm
+        )
+        t_mm = (time.perf_counter() - t0) * 1000
 
+        s_ab = {"nodes": 0, "cutoffs": 0}
         t1 = time.perf_counter()
-        ab_stats = {"nodes": 0}
-        alphabeta_search(env, state_tuple, d, -float("inf"), float("inf"), True, center, w, ab_stats)
-        ab_ms = (time.perf_counter() - t1) * 1000
+        alphabeta_search(
+            env,
+            env.agent_pos,
+            env.rival_pos,
+            set(env.delivered),
+            set(env.stolen),
+            env.t,
+            env.rival_cooldown,
+            d,
+            -math.inf,
+            math.inf,
+            True,
+            s_ab,
+        )
+        t_ab = (time.perf_counter() - t1) * 1000
 
-        saved_pct = ((mm_stats["nodes"] - ab_stats["nodes"]) / max(1, mm_stats["nodes"])) * 100.0
+        red = (1.0 - s_ab["nodes"] / max(1, s_mm["nodes"])) * 100.0
+        print(f"{d:<8} {s_mm['nodes']:>15} {s_ab['nodes']:>18} {red:>11.1f}% {t_mm:>14.2f} {t_ab:>14.2f}")
         rows.append({
             "depth": d,
-            "minimax_nodes": mm_stats["nodes"],
-            "alphabeta_nodes": ab_stats["nodes"],
-            "saved_pct": round(saved_pct, 2),
-            "minimax_ms": round(mm_ms, 2),
-            "alphabeta_ms": round(ab_ms, 2),
+            "minimax_nodes": s_mm["nodes"],
+            "alphabeta_nodes": s_ab["nodes"],
+            "reduction_pct": round(red, 2),
+            "minimax_ms": round(t_mm, 2),
+            "alphabeta_ms": round(t_ab, 2),
         })
+    print("-" * 92)
     return rows

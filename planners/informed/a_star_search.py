@@ -14,8 +14,12 @@ from planners.state import (
     format_result,
 )
 
-def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom MST)", track_memory=True):
-    """From-scratch optimal A* Search: f(n) = g(n) + h(n)."""
+def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom MST)", track_memory=True, memory_limit=None):
+    """
+    From-scratch optimal A* Search: f(n) = g(n) + h(n).
+    memory_limit: optional cap on the number of states stored in best_g.
+    If the cap is exceeded the search stops and returns status MEMORY_LIMIT.
+    """
     if track_memory:
         tracemalloc.start()
     t0 = time.perf_counter()
@@ -47,6 +51,16 @@ def a_star(env, heuristic_fn=custom_mst_heuristic, start_t=0, label="A* (Custom 
             if new_g < best_g.get(next_state, float("inf")):
                 best_g[next_state] = new_g
                 came_from[next_state] = curr
+
+                if memory_limit is not None and len(best_g) > memory_limit:
+                    peak_kb = (tracemalloc.get_traced_memory()[1] / 1024.0) if track_memory else 0.0
+                    if track_memory:
+                        tracemalloc.stop()
+                    return format_result(
+                        label, [], float("inf"), expanded, peak_kb,
+                        (time.perf_counter() - t0) * 1000, "MEMORY_LIMIT"
+                    )
+
                 f_val = new_g + heuristic_fn(next_state, env.stops)
                 heapq.heappush(pq, (f_val, new_g, curr_t + 1, next_state))
 
